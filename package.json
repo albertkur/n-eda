@@ -36,6 +36,7 @@
     "homepage": "https://github.com/nivinjoseph/n-eda#readme",
     "devDependencies": {
         "@eslint/js": "10.0.1",
+        "@opentelemetry/sdk-metrics": "2.8.0",
         "@stylistic/eslint-plugin": "5.10.0",
         "@types/murmurhash3js": "3.0.7",
         "@types/node": "24.10",
@@ -58,7 +59,6 @@
         "@nivinjoseph/n-svc": "4.0.1",
         "@nivinjoseph/n-util": "4.0.2",
         "@opentelemetry/api": "1.9.1",
-        "@opentelemetry/sdk-node": "0.218.0",
         "@opentelemetry/semantic-conventions": "1.41.1",
         "ioredis": "5.11.0",
         "murmurhash3js": "3.0.1"

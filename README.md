@@ -21,7 +21,8 @@ your entire fleet.
 - **Out-of-process consumers** — proxy event processing to AWS Lambda, HTTP RPC, or gRPC
 - **Distributed observer pattern** — subscribe to events from a *specific instance* of a remote entity
 - **Convention-based handler discovery** — `discoverEventHandlers()` replaces hand-maintained registration lists
-- **OpenTelemetry tracing** built in — producer → receive → process spans with W3C context propagation
+- **OpenTelemetry tracing and metrics** built in — producer → receive → process spans with W3C context
+  propagation, plus handler latency, outcome, event-age, and partition-lag instruments
 
 ## Installation
 
@@ -521,10 +522,35 @@ through the event payload:
 |---|---|---|
 | `event.<EventName> publish` | `PRODUCER` | the producer, on publish |
 | `event.<EventName> receive` | `INTERNAL` | the consumer, spanning queue wait + all retries |
-| `event.<EventName> process` | `CONSUMER` | the processor, around `handle()` |
+| `event.<EventName> process` | `CONSUMER` | the processor, spanning every attempt and the retry delays between them |
 
 Attributes follow the `messaging.*` semantic conventions. No setup is required beyond having an
 OpenTelemetry SDK configured in your process.
+
+n-eda also records metrics under the meter name `"n-eda"`:
+
+| Instrument | Type | What it answers |
+|---|---|---|
+| `messaging.process.duration` | histogram, seconds | Handler latency per attempt; failed attempts carry `error.type` |
+| `neda.event.processed` | counter | Final outcomes; `neda.outcome="failed"` counts events dropped after their retries |
+| `neda.event.age` | histogram, seconds | How long an event waited between publish and consumer pickup |
+| `neda.partition.lag` | observable gauge, batches | Lag per partition |
+| `neda.partition.lag_peak` | observable gauge, batches | The highest lag since the previous collection, even if it drained before then |
+| `neda.partition.sample_age` | observable gauge, seconds | How stale that lag figure is; climbs while a partition is stuck |
+| `neda.partition.written` / `neda.partition.consumed` | observable counters, batches | Write and read index per partition; their rates are the production and consumption rates |
+| `neda.batch.lost` | counter, batches | Batches whose payload never arrived: lost events. Alert on any increase |
+| `neda.event.skipped` | counter | Events a consumer passed over, by `neda.skip.reason`: `duplicate`, `no_handler`, `partition_key_error` |
+| `messaging.client.sent.messages` | counter | Events published, per type, from the publishing process; failed writes carry `error.type` |
+| `neda.event.dropped` | counter | Events `publish()` discarded because this process has no handler for them and the topic isn't forced |
+
+They need no n-eda opt-in, but `bootstrap()` takes the meter **once**: register your `MeterProvider`
+before calling it, or every recording is a no-op. The producer stamps each event with `$publishedAt`
+(epoch ms) for the age metric; older consumers ignore it. Attributes, cardinality, and how to read these
+metrics are covered in [docs/observability.md](docs/observability.md#opentelemetry-metrics).
+
+**Upgrading with Datadog:** the setup documented up to 7.0.5 generated a log-based metric named
+`neda.partition.lag`. The gauge above now uses that name and flows without opt-in, so delete the log-based
+metric before deploying the upgrade ([details](docs/observability.md#datadog)).
 
 > On failure, n-eda records the **full serialized event payload** into span attributes and log lines.
 > If your events carry personal data, account for that in your telemetry pipeline.
@@ -601,8 +627,9 @@ Pass a `Container` to share one with the rest of your app; **you** must then boo
 - `bootstrap(): Promise<void>` — **async.** Requires at least one topic and a registered event bus.
   Rejects if called twice, if the manager is both an event subscriber and a Lambda or RPC consumer, or
   if it is both a Lambda and an RPC consumer. Installs the default partition key mapper, builds the
-  topic map, bootstraps the container (only if it owns it), then `initialize(this)` on the event bus,
-  sub manager, and any proxy handler.
+  topic map, bootstraps the container (only if it owns it), takes the `"n-eda"` meter from the global
+  OpenTelemetry `MeterProvider` (register yours first), then `initialize(this)` on the event bus, sub
+  manager, and any proxy handler.
 - `beginConsumption(): Promise<void>` — requires `bootstrap()` and a registered `EventSubMgr`.
   **Does not resolve** until `dispose()`. Do not `await` it in a startup path.
 - `mapToPartition(topic: string, event: EdaEvent): number` — requires bootstrap. Note the topic map is
@@ -613,7 +640,8 @@ Pass a `Container` to share one with the rest of your app; **you** must then boo
 **Getters** — `containerRegistry`, `serviceLocator`, `topics`, `distributedObserverTopic`, `eventMap`,
 `observerEventMap`, `consumerName`, `consumerGroupId`, `cleanKeys`, `partitionKeyMapper`, `metricsEnabled`, `metricsInterval`,
 `awsLambdaDetails`, `awsLambdaProxyEnabled`, `isAwsLambdaConsumer`, `rpcDetails`, `rpcProxyEnabled`,
-`isRpcConsumer`, `grpcDetails`, `grpcProxyEnabled`, `isGrpcConsumer`.
+`isRpcConsumer`, `grpcDetails`, `grpcProxyEnabled`, `isGrpcConsumer`, and `otelMetrics` (internal: the
+OpenTelemetry instruments the consume path records into; a no-op instance before `bootstrap()`).
 
 ### `EdaEvent`
 
@@ -845,7 +873,7 @@ consumer's dedupe tracking list. Use it to force reprocessing after a deliberate
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — Redis key layout, the consume loop, delivery guarantees, tuning constants
 - [llms.txt](llms.txt) — condensed API guide and the rules the type system does not enforce
-- [docs/observability.md](docs/observability.md) — the partition metrics log contract and Datadog dashboard setup
+- [docs/observability.md](docs/observability.md) — the OpenTelemetry metrics, the partition metrics log contract, and Datadog setup
 - [docs/known-issues.md](docs/known-issues.md) — known defects and their workarounds
 
 ## Contributing

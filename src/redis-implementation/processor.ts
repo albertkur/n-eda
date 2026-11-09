@@ -13,6 +13,7 @@ import {
     ATTR_MESSAGING_MESSAGE_ID,
     ATTR_MESSAGING_MESSAGE_CONVERSATION_ID
 } from "@opentelemetry/semantic-conventions/incubating";
+import { EdaMetrics } from "../metrics/eda-metrics.js";
 import { WorkItem } from "./scheduler.js";
 
 
@@ -30,6 +31,10 @@ import { WorkItem } from "./scheduler.js";
  *
  * Subclasses supply the actual dispatch: `DefaultProcessor` runs handlers in-process; the proxy processors
  * forward to Lambda, RPC, or gRPC.
+ *
+ * Metrics: every attempt records its duration (`messaging.process.duration`, with `error.type` when it threw),
+ * and every final outcome counts once in `neda.event.processed`. For the proxy processors the duration
+ * includes the network round trip. Nothing is recorded when disposal interrupts an event, because it replays.
  */
 export abstract class Processor implements Disposable
 {
@@ -37,6 +42,7 @@ export abstract class Processor implements Disposable
     // private readonly _consumerTracer: ConsumerTracer | null;
     // private readonly _hasConsumerTracer: boolean;
     private readonly _logger: Logger;
+    private readonly _otelMetrics: EdaMetrics;
     private readonly _availabilityObserver = new Observer<this>("available");
     private readonly _doneProcessingObserver = new Observer<WorkItem>("done-processing");
 
@@ -68,6 +74,7 @@ export abstract class Processor implements Disposable
         // this._hasConsumerTracer = this._consumerTracer != null;
 
         this._logger = this._manager.serviceLocator.resolve<Logger>("Logger");
+        this._otelMetrics = this._manager.otelMetrics;
     }
 
 
@@ -121,6 +128,7 @@ export abstract class Processor implements Disposable
     private async _process(): Promise<void>
     {
         const workItem = this._currentWorkItem!;
+        const eventType = workItem.eventRegistration.eventTypeName;
         
         const parentContext = otelApi.trace.setSpan(otelApi.context.active(), workItem.span);
         
@@ -154,6 +162,7 @@ export abstract class Processor implements Disposable
                     }
 
                     numProcessAttempts++;
+                    const attemptStart = performance.now();
 
                     try 
                     {
@@ -171,17 +180,23 @@ export abstract class Processor implements Disposable
                         //     await this.processEvent(workItem);
 
                         await this.processEvent(workItem);
+                        this._otelMetrics.recordAttemptSuccess(workItem.topic, eventType,
+                            (performance.now() - attemptStart) / 1000);
                         workItem.deferred.resolve();
                         return;
                     }
                     catch (error: any)
                     {
+                        const attemptSeconds = (performance.now() - attemptStart) / 1000;
+
                         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
                         if (this._isDisposed)
                         {
                             workItem.deferred.reject(new ObjectDisposedException("Processor"));
                             return;
                         }
+
+                        this._otelMetrics.recordAttemptFailure(workItem.topic, eventType, attemptSeconds, error);
 
                         // if (numProcessAttempts > 8)
                         // {
@@ -211,6 +226,7 @@ export abstract class Processor implements Disposable
             }
             catch (error: any)
             {
+                this._otelMetrics.recordRetriesExhausted(workItem.topic, eventType);
                 span.recordException(error as Error);
                 span.addEvent(`Failed to process event of type '${workItem.eventName}'`, {
                     eventData: JSON.stringify(workItem.event.serialize())

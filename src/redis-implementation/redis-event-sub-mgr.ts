@@ -34,7 +34,8 @@ import { DefaultEdaContext } from "../eda-context.js";
  * On `consume()` it creates, for every topic that is neither disabled nor publish-only, one `Consumer` and
  * one `Processor` per owned partition — all partitions unless `Topic.configurePartitionAffinity` narrowed
  * the range — plus a `Broker` per topic, process-wide a `Monitor`, and (only when
- * `EdaManager.enableMetrics()` was called) a `MetricsReporter`.
+ * `EdaManager.enableMetrics()` was called) a `MetricsReporter`. It also registers the OpenTelemetry partition
+ * instruments, regardless of `enableMetrics()`.
  *
  * Note: this is the only path that populates `EdaContext`. If every registered topic is publish-only or
  * disabled while a subscription manager is registered, `consume()` throws, because the `Monitor` requires a
@@ -49,6 +50,7 @@ export class RedisEventSubMgr implements EventSubMgr
     // Assigned only once consume() has run, so dispose() has to tolerate them being absent.
     private _monitor: Monitor | null = null;
     private _metricsReporter: MetricsReporter | null = null;
+    private _unobservePartitions: (() => void) | null = null;
 
     private _isDisposing = false;
     private _isDisposed = false;
@@ -156,6 +158,10 @@ export class RedisEventSubMgr implements EventSubMgr
                 if (this._isDisposing)
                     return;
 
+                // Not gated on enableMetrics(): the instruments read the consumers' own readings, not the log
+                // reporter's samples, and are no-ops unless the host registered a MeterProvider.
+                this._unobservePartitions = this._manager.otelMetrics.observePartitions();
+
                 // Metrics are opt-in via EdaManager.enableMetrics(); without it no reporter exists and no
                 // metrics lines are emitted. consumerGroupId is non-null here: registerEventSubscriptionManager
                 // requires it, and consume() only runs when a sub-mgr was registered.
@@ -174,6 +180,9 @@ export class RedisEventSubMgr implements EventSubMgr
                 // Unwind fully so a caller that catches and retries consume() after a transient failure gets
                 // a real second attempt — otherwise the _isConsuming guard above would skip setup and leave
                 // the process sitting in the wait loop below, looking healthy while consuming nothing.
+                this._unobservePartitions?.();
+                this._unobservePartitions = null;
+
                 await Promise.all([
                     this._monitor?.dispose(),
                     this._metricsReporter?.dispose(),
@@ -201,6 +210,11 @@ export class RedisEventSubMgr implements EventSubMgr
         {
             this._isDisposing = true;
             console.warn("Disposing EventSubMgr");
+
+            // The meter outlives this manager; a callback left registered would keep reporting dead brokers.
+            this._unobservePartitions?.();
+            this._unobservePartitions = null;
+
             this._disposePromise = Promise.all([
                 // ...this._monitors.map(t => t.dispose()),
                 // Optional: both are only assigned once consume() has run, so disposing a manager that never

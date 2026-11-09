@@ -17,6 +17,9 @@ import { GrpcEventHandler } from "./redis-implementation/grpc-event-handler.js";
 import { GrpcDetails } from "./grpc-details.js";
 import { ObserverEdaEventHandler } from "./observer-eda-event-handler.js";
 import { DefaultEdaContext } from "./eda-context.js";
+import * as otelApi from "@opentelemetry/api";
+import { Logger } from "@nivinjoseph/n-log";
+import { EdaMetrics } from "./metrics/eda-metrics.js";
 // import { ConsumerTracer } from "./event-handler-tracer";
 
 /**
@@ -65,6 +68,8 @@ export class EdaManager implements Disposable
 
     private _metricsEnabled = false;
     private _metricsInterval = Duration.fromMinutes(1);
+    // Replaced in bootstrap(); no-op until then, so nothing can record into a meter taken too early.
+    private _otelMetrics = new EdaMetrics(otelApi.createNoopMeter(), null);
     private _partitionKeyMapper: (event: EdaEvent) => string = null as any;
     private _eventBusRegistered = false;
     private _eventSubMgrRegistered = false;
@@ -181,6 +186,15 @@ export class EdaManager implements Disposable
      * Defaults to one minute; see {@link EdaManager.enableMetrics}.
      */
     public get metricsInterval(): Duration { return this._metricsInterval; }
+
+    /**
+     * The OpenTelemetry instruments n-eda records into. Created by `bootstrap()`; a no-op instance before it.
+     *
+     * Note: internal — the consume path records through it. These metrics need no opt-in on the n-eda side;
+     * they are live whenever the host registered a `MeterProvider` before `bootstrap()`. See
+     * `docs/observability.md`.
+     */
+    public get otelMetrics(): EdaMetrics { return this._otelMetrics; }
 
 
     /**
@@ -678,8 +692,13 @@ export class EdaManager implements Disposable
      * Finalizes configuration and brings the manager up. **Async since 7.0.0 — always `await` it.**
      *
      * In order: installs the default partition key mapper if none was set; builds the topic lookup map;
-     * bootstraps the container (only if this manager created it); then calls `initialize(this)` on the event
-     * bus, the subscription manager if registered, and any proxy consumer handler.
+     * bootstraps the container (only if this manager created it); takes the `"n-eda"` meter from the global
+     * OpenTelemetry `MeterProvider`; then calls `initialize(this)` on the event bus, the subscription manager
+     * if registered, and any proxy consumer handler.
+     *
+     * Note: register your `MeterProvider` before calling this. The meter taken here is kept for the
+     * manager's lifetime, and if no provider is registered yet it is a no-op meter. That case is logged once,
+     * at info level, through the container's `"Logger"`.
      *
      * After this returns, every configuration method throws.
      *
@@ -719,6 +738,18 @@ export class EdaManager implements Disposable
 
         if (this._ownsContainer)
             await this._container.bootstrap();
+
+        // As late as possible: the metrics API hands out a no-op meter, permanently, if no MeterProvider is
+        // registered yet — and a host may register one from code that runs ahead of bootstrap.
+        const meter = otelApi.metrics.getMeter("n-eda");
+        this._otelMetrics = new EdaMetrics(meter, this._consumerGroupId);
+
+        // The API hands out one shared no-op meter, so identity tells a dead meter apart. Info, not a warning:
+        // a host that does not use OpenTelemetry metrics would otherwise be warned on every start.
+        if (meter === otelApi.createNoopMeter())
+            await this._container.resolve<Logger>("Logger").logInfo("n-eda: OpenTelemetry metrics are off for "
+                + "this manager's lifetime. No MeterProvider was registered before bootstrap(), or the registered "
+                + "one comes from an @opentelemetry/api version incompatible with n-eda's.");
 
         this._container.resolve<EventBus>(EdaManager.eventBusKey).initialize(this);
 

@@ -1,43 +1,18 @@
-import { Logger } from "@nivinjoseph/n-log";
 import { Duration } from "@nivinjoseph/n-util";
 import assert from "node:assert";
 import test, { describe } from "node:test";
 import { EdaManager } from "../src/eda-manager.js";
 import { Broker } from "../src/redis-implementation/broker.js";
-import { Consumer } from "../src/redis-implementation/consumer.js";
 import { MetricsReporter } from "../src/redis-implementation/metrics-reporter.js";
-import { Processor } from "../src/redis-implementation/processor.js";
-import { Topic } from "../src/topic.js";
+import { createStubBroker as createBroker, silentLogger } from "./utils/test-stubs.js";
 
 
-/**
- * Broker.report is pure in-memory arithmetic, so it is exercised directly rather than through Redis. The
- * broker only requires its consumers and processors to be a non-empty array of the matching length, and the
- * scheduler only subscribes to a processor's two observables — hence the stubs.
- */
-function createBroker(topicName = "metrics-test"): Broker
-{
-    const topic = new Topic(topicName, Duration.fromMinutes(10), 1);
-
-    const processor = {
-        availability: { subscribe: (): void => { /* never fires in these tests */ } },
-        doneProcessing: { subscribe: (): void => { /* never fires in these tests */ } }
-    } as unknown as Processor;
-
-    return new Broker(topic, [{} as unknown as Consumer], [processor]);
-}
+// Broker.report is pure in-memory arithmetic, so it is exercised directly rather than through Redis.
 
 function createReporter(brokers: Array<Broker>): MetricsReporter
 {
-    const logger: Logger = {
-        logDebug: () => Promise.resolve(),
-        logInfo: () => Promise.resolve(),
-        logWarning: () => Promise.resolve(),
-        logError: () => Promise.resolve()
-    };
-
     // Never started in these tests — buildRecords is called directly, so no timer is involved.
-    return new MetricsReporter(brokers, logger, "test-group", "test-consumer", Duration.fromMinutes(1));
+    return new MetricsReporter(brokers, silentLogger, "test-group", "test-consumer", Duration.fromMinutes(1));
 }
 
 const minute = Duration.fromMinutes(1).toMilliSeconds();

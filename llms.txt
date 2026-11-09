@@ -1,6 +1,6 @@
 # @nivinjoseph/n-eda
 
-> TypeScript framework for event-driven architecture on Node.js: a partitioned, ordered, at-least-once event log backed by Redis, with dependency-injected event handlers, consumer groups, a distributed observer pattern, out-of-process consumers (AWS Lambda / HTTP RPC / gRPC), and built-in OpenTelemetry tracing. ESM only, Node >= 24.10, standard (ES2023+) TypeScript decorators. Redis is required — there is no in-memory implementation.
+> TypeScript framework for event-driven architecture on Node.js: a partitioned, ordered, at-least-once event log backed by Redis, with dependency-injected event handlers, consumer groups, a distributed observer pattern, out-of-process consumers (AWS Lambda / HTTP RPC / gRPC), and built-in OpenTelemetry tracing and metrics. ESM only, Node >= 24.10, standard (ES2023+) TypeScript decorators. Redis is required — there is no in-memory implementation.
 
 Install: `npm install @nivinjoseph/n-eda`
 
@@ -33,7 +33,7 @@ DI keys YOU must provide: `"EdaRedisClient"` (an ioredis `Redis`), `"Logger"` (a
 - `ApplicationScript` — `{ run(): Promise<void> }`; startup/shutdown hooks for the servers
 - `NedaClearTrackedKeysEvent` — internal system event; fans out to all partitions and clears dedupe tracking
 
-NOT exported (do not import): `InMemoryEventBus`, `InMemoryEventSubMgr` (commented out of the barrel), `Duration` (that is `@nivinjoseph/n-util`), `DefaultEdaContext`, `RpcModel`, `GrpcModel`, `TopicPartitionMetrics`.
+NOT exported (do not import): `InMemoryEventBus`, `InMemoryEventSubMgr` (commented out of the barrel), `Duration` (that is `@nivinjoseph/n-util`), `DefaultEdaContext`, `RpcModel`, `GrpcModel`, `TopicPartitionMetrics`, `EdaMetrics` (internal; the consume path reaches it as `edaManager.otelMetrics`).
 
 ## Minimal correct skeletons
 
@@ -183,7 +183,7 @@ await eventBus.subscribeToObservables(Customer, customerId, [
 6. **Topics are publish-only by default.** `new Topic(...)` has `publishOnly === true`. Without `.subscribe()` the service publishes correctly and silently never consumes.
 7. **`await bootstrap()`** — it is async (breaking change in 7.0.0).
 8. **Never `await beginConsumption()`** — it is the consume loop and does not resolve until `dispose()`. Awaiting it hangs startup.
-9. **Events with no locally-registered handler are silently DROPPED at publish time.** A dedicated publisher service (one that emits events it does not itself consume) writes nothing until you call `.forcePublish()` on the topic. This is the sharpest edge in the library.
+9. **Events with no locally-registered handler are silently DROPPED at publish time.** A dedicated publisher service (one that emits events it does not itself consume) writes nothing until you call `.forcePublish()` on the topic. This is the sharpest edge in the library. The `neda.event.dropped` metric counts these drops.
 10. **An installer registering `"EdaRedisClient"` and `"Logger"` is mandatory.** `bootstrap()` throws without it. n-eda never closes the Redis client — register a `Disposable` too.
 11. **Topic TTL rounds to whole minutes.** `Duration.fromSeconds(20)` → 0 minutes → Redis `ERR invalid expire time`. Use >= 1 minute.
 12. **`numPartitions` is effectively immutable.** Partition = `murmurhash3 x86 hash32(partitionKey) % numPartitions`; changing it rehashes every key, breaks per-key ordering, and orphans events in partitions nobody reads.
@@ -198,6 +198,7 @@ await eventBus.subscribeToObservables(Customer, customerId, [
 21. **`EdaManager.dispose()` disposes the container even when you supplied it.** If you passed your own `Container`, expect it to be disposed — and note that you, not n-eda, must have bootstrapped it.
 22. **Run Redis with `maxmemory-policy noeviction`.** The write-index, read-index, and tracked-keys keys carry no TTL. Evicting the write index resets it to 0 while the read index stays high, which stops consumption permanently and silently.
 23. **Partition metrics are opt-in via `enableMetrics(metricsInterval?)`.** Without the call, a consuming process emits no metrics lines. With it, the process logs one flat JSON metrics line **per topic-partition per interval** (default 1 minute) for log-pipeline dashboards — volume is `topics × partitions` per interval, billed on ingest. The optional interval must be positive and at most 2^31-1 ms (~24.8 days, Node's timer maximum). Read back via the `metricsEnabled` / `metricsInterval` getters; the log contract is specified in `docs/observability.md`.
+24. **OpenTelemetry metrics need no opt-in, but the `MeterProvider` must be registered BEFORE `bootstrap()`.** `bootstrap()` takes the `"n-eda"` meter once; with no provider registered at that moment it is a no-op meter for the manager's lifetime (logged once, at info). The provider's resource must identify the process (`service.instance.id`): replicas of one consumer group emit identical per-event attribute sets, so without it their series merge. Instruments: `messaging.process.duration` (seconds, per attempt, `error.type` on failure), `neda.event.processed` (`neda.outcome` = `success`/`failed`; `failed` = dropped after retries), `neda.event.age` (publish → pickup, seconds, from the producer's `$publishedAt` stamp — unstamped events from older producers are not measured), `neda.partition.lag` (in publish BATCHES, not events), `neda.partition.lag_peak` (gauge: the highest lag since the previous collection, under either temporality; assumes ONE metrics reader, since each collection resets it) `neda.partition.sample_age` (seconds; climbs while a partition is stuck), and the counters `neda.partition.written` / `neda.partition.consumed` (write / read index in batches; take their RATE in the backend for production / consumption rate — n-eda exports no precomputed rates). Also: `neda.batch.lost` (events LOST — a payload that never arrived or expired under the TTL; alert on any increase), `neda.event.skipped` (`neda.skip.reason` = `duplicate` / `no_handler` / `partition_key_error`), `messaging.client.sent.messages` (events published, per type, no consumer group; `error.type` on failed writes), and `neda.event.dropped` (publish-time drops, see rule 9). Processed and age count per DELIVERY: a replayed event counts again. Independent of `enableMetrics()`. Never add event ids or partition keys as metric attributes. Details in `docs/observability.md`.
 
 ## Reference implementation
 
@@ -205,7 +206,7 @@ await eventBus.subscribeToObservables(Customer, customerId, [
 - `test/eda.test.ts` — executable spec: publishes 10,000 events and asserts per-partition ordering against real Redis
 - `README.md` — concepts, full API reference, best practices
 - `ARCHITECTURE.md` — Redis key layout, consume loop, delivery guarantees, tuning constants
-- `docs/observability.md` — partition-metrics log contract and Datadog dashboard setup
+- `docs/observability.md` — OpenTelemetry metrics, the partition-metrics log contract, and Datadog setup
 - `docs/known-issues.md` — known defects and workarounds
 
 When docs and code disagree, trust `test/`.

@@ -23,8 +23,9 @@ Redis-backed partitioned event log with DI-resolved handlers.
 - `src/` — `src/index.ts` is the barrel (27 exports + the `Symbol.metadata` polyfill).
   Root-level files are the public contracts; `src/redis-implementation/` is the runtime;
   `src/discovery/` is convention-based handler discovery.
-- `test/` — `node:test` suites, one process per file. `eda.test.ts` and `observer.test.ts` need a live Redis;
-  `guards.test.ts` (bootstrap validation) does not.
+- `test/` — `node:test` suites, one process per file. `eda.test.ts`, `observer.test.ts`, and
+  `event-age.test.ts` need a live Redis; `guards.test.ts` (bootstrap validation) and `otel-metrics.test.ts`
+  (OpenTelemetry instruments, against an in-memory metrics SDK) do not.
 - `dist/` — published build output, **committed to git**.
 
 Fully commented-out and therefore inactive: `src/in-memory-implementation/*`,

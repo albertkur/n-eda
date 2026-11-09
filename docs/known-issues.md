@@ -168,8 +168,8 @@ gRPC at runtime. The `endsWith` check is also brittle for non-`dist` layouts.
 - `src/event-handler-tracer.ts` — entirely comments. `registerConsumerTracer` is commented out of
   `EdaManager`, and `test/utils/eda-test-utils.ts` references a `registerEventHandlerTracer` that never
   existed under that name.
-- `src/redis-implementation/consumer-profiler.ts`, `profiling-consumer.ts` — not wired up; `enableMetrics()` is
-  commented out.
+- `src/redis-implementation/consumer-profiler.ts`, `profiling-consumer.ts` — not wired up. `enableMetrics()`
+  is live, but it drives `MetricsReporter`, not these files.
 - `src/redis-implementation/default-scheduler.ts` — `@deprecated`; `Broker` always uses `OptimizedScheduler`.
 - Wildcard event-name matching was removed but its parsing remains commented in
   `event-registration.ts:103-116`.
