@@ -13,6 +13,7 @@ import { RpcEventHandler } from "./redis-implementation/rpc-event-handler.js";
 import { GrpcEventHandler } from "./redis-implementation/grpc-event-handler.js";
 import { GrpcDetails } from "./grpc-details.js";
 import { ObserverEdaEventHandler } from "./observer-eda-event-handler.js";
+import { EdaMetrics } from "./metrics/eda-metrics.js";
 /**
  * The root object of an n-eda application: a dependency-injection container wrapper that owns topic and
  * handler configuration, and drives the publish/consume lifecycle.
@@ -55,6 +56,7 @@ export declare class EdaManager implements Disposable {
     private readonly _observerEventMap;
     private _metricsEnabled;
     private _metricsInterval;
+    private _otelMetrics;
     private _partitionKeyMapper;
     private _eventBusRegistered;
     private _eventSubMgrRegistered;
@@ -137,6 +139,14 @@ export declare class EdaManager implements Disposable {
      * Defaults to one minute; see {@link EdaManager.enableMetrics}.
      */
     get metricsInterval(): Duration;
+    /**
+     * The OpenTelemetry instruments n-eda records into. Created by `bootstrap()`; a no-op instance before it.
+     *
+     * Note: internal — the consume path records through it. These metrics need no opt-in on the n-eda side;
+     * they are live whenever the host registered a `MeterProvider` before `bootstrap()`. See
+     * `docs/observability.md`.
+     */
+    get otelMetrics(): EdaMetrics;
     /**
      * Creates a manager, optionally sharing an existing DI container.
      *
@@ -377,8 +387,13 @@ export declare class EdaManager implements Disposable {
      * Finalizes configuration and brings the manager up. **Async since 7.0.0 — always `await` it.**
      *
      * In order: installs the default partition key mapper if none was set; builds the topic lookup map;
-     * bootstraps the container (only if this manager created it); then calls `initialize(this)` on the event
-     * bus, the subscription manager if registered, and any proxy consumer handler.
+     * bootstraps the container (only if this manager created it); takes the `"n-eda"` meter from the global
+     * OpenTelemetry `MeterProvider`; then calls `initialize(this)` on the event bus, the subscription manager
+     * if registered, and any proxy consumer handler.
+     *
+     * Note: register your `MeterProvider` before calling this. The meter taken here is kept for the
+     * manager's lifetime, and if no provider is registered yet it is a no-op meter. That case is logged once,
+     * at info level, through the container's `"Logger"`.
      *
      * After this returns, every configuration method throws.
      *

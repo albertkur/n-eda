@@ -106,8 +106,10 @@ let RedisEventBus = (() => {
                         }
                         continue;
                     }
-                    if (!this._manager.eventMap.has(event.name) && !pubTopic.isForce)
+                    if (!this._manager.eventMap.has(event.name) && !pubTopic.isForce) {
+                        this._manager.otelMetrics.recordEventDropped(topic, event.name);
                         continue;
+                    }
                     const partition = this._manager.mapToPartition(topic, event);
                     if (!partitionEvents.has(partition))
                         partitionEvents.set(partition, new Array());
@@ -118,7 +120,11 @@ let RedisEventBus = (() => {
                 const promises = new Array();
                 partitionEvents.forEach((events, partition) => {
                     const producerKey = this._generateKey(topic, partition);
-                    promises.push(this._producers.get(producerKey).produce(...events));
+                    const eventTypes = events.map(t => t.name);
+                    promises.push(this._producers.get(producerKey).produce(...events).then(() => this._manager.otelMetrics.recordEventsSent(topic, eventTypes), (error) => {
+                        this._manager.otelMetrics.recordEventsSendFailed(topic, eventTypes, error);
+                        throw error;
+                    }));
                 });
                 await Promise.all(promises);
             }
@@ -164,10 +170,16 @@ let RedisEventBus = (() => {
                 }
                 if (partitionEvents.size === 0)
                     return;
+                const observerTopic = this._manager.distributedObserverTopic.name;
                 const promises = new Array();
                 partitionEvents.forEach((events, partition) => {
-                    const producerKey = this._generateKey(this._manager.distributedObserverTopic.name, partition);
-                    promises.push(this._producers.get(producerKey).produce(...events));
+                    const producerKey = this._generateKey(observerTopic, partition);
+                    // Measured under the observed event's type, as the consumer side measures them.
+                    const eventTypes = events.map(t => t.observedEvent.name);
+                    promises.push(this._producers.get(producerKey).produce(...events).then(() => this._manager.otelMetrics.recordEventsSent(observerTopic, eventTypes), (error) => {
+                        this._manager.otelMetrics.recordEventsSendFailed(observerTopic, eventTypes, error);
+                        throw error;
+                    }));
                 });
                 await Promise.all(promises);
             }

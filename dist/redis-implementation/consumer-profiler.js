@@ -1,5 +1,6 @@
-// INACTIVE — this file is commented out in its entirety and is unwired; `EdaManager.enableMetrics` is also
-// commented out. Lag and throughput metrics are emitted by monitor.ts instead. Kept for reference only.
+// INACTIVE — this file is commented out in its entirety and is unwired. Lag and throughput are reported by
+// metrics-reporter.ts (log lines, behind `EdaManager.enableMetrics`) and metrics/eda-metrics.ts
+// (OpenTelemetry). Kept for reference only.
 export {};
 // import { given } from "@nivinjoseph/n-defensive";
 // import { ProfilerTrace, Profiler } from "@nivinjoseph/n-util";

@@ -40,6 +40,7 @@ export class Consumer {
     _cleanKeys;
     // private readonly _trackedKeysKey: string;
     _flush;
+    _otelMetrics;
     _isDisposed = false;
     _maxTrackedSize = 3000;
     _keepTrackedSize = 1000;
@@ -72,6 +73,7 @@ export class Consumer {
         this._reportIntervalMs = this._manager.metricsInterval.toMilliSeconds() / 2;
         given(flush, "flush").ensureHasValue().ensureIsBoolean();
         this._flush = flush;
+        this._otelMetrics = this._manager.otelMetrics;
     }
     registerBroker(broker) {
         given(broker, "broker").ensureHasValue().ensureIsObject().ensureIsObject().ensureIsType(Broker);
@@ -116,6 +118,10 @@ export class Consumer {
                 // const writeIndex = await this._fetchPartitionWriteIndex();
                 // const readIndex = await this._fetchConsumerPartitionReadIndex();
                 const [writeIndex, readIndex] = await this._fetchPartitionWriteAndConsumerPartitionReadIndexes();
+                // The OpenTelemetry partition instruments' own reading, independent of the log reporter's cadence
+                // below. Every pass: the indexes are already in hand, and a spike that comes and goes between two
+                // collections would otherwise never reach the peak gauge.
+                this._otelMetrics.recordPartitionReading(this._topic, this._partition, writeIndex, readIndex);
                 const now = Date.now();
                 // report() is an in-memory map write, so the half-interval frequency costs nothing.
                 if ((now - this._lastReportTime) > this._reportIntervalMs) {
@@ -175,6 +181,7 @@ export class Consumer {
                         catch (error) {
                             await this._logger.logError(error);
                         }
+                        this._otelMetrics.recordBatchLost(this._topic, this._partition);
                         await this._incrementConsumerPartitionReadIndex();
                         continue;
                     }
@@ -185,9 +192,15 @@ export class Consumer {
                         //     continue;
                         // const eventName = (<any>event).$name || (<any>event).name; // for compatibility with n-domain DomainEvent
                         const deserializedEvent = Deserializer.deserialize(event);
+                        // The type it is measured under: for an observer notification, the observed event's.
+                        const eventType = deserializedEvent.name === this._nedaDistributedObserverNotifyEventName
+                            ? deserializedEvent.observedEvent.name
+                            : deserializedEvent.name;
                         const eventId = deserializedEvent.id;
-                        if (this._trackedKeysSet.has(eventId))
+                        if (this._trackedKeysSet.has(eventId)) {
+                            this._otelMetrics.recordEventSkipped(this._topic, eventType, "duplicate");
                             continue;
+                        }
                         if (deserializedEvent.name === this._nedaClearTrackedKeysEventName) {
                             await this._logger.logWarning(`NedaClearTrackedKeysEvent (${this._fullId}) --- clearing all event tracking data`);
                             await this._clearAllEventTracking();
@@ -205,6 +218,7 @@ export class Consumer {
                             eventRegistration = this._manager.eventMap.get(eventName);
                         if (eventRegistration == null) // Because we check event registrations on publish, if the registration is null here, then that is a consequence of rolling deployment
                          {
+                            this._otelMetrics.recordEventSkipped(this._topic, eventType, "no_handler");
                             this._track(eventId);
                             continue;
                         }
@@ -252,6 +266,22 @@ export class Consumer {
         let brokerDisposed = false;
         try {
             await otelApi.context.with(otelApi.trace.setSpan(otelApi.context.active(), span), async () => {
+                // First, so that a throwing mapper skips the event (see the catch below) before it is measured.
+                let partitionKey;
+                try {
+                    partitionKey = this._manager.partitionKeyMapper(event);
+                }
+                catch (error) {
+                    // Counted here because the catch below cannot tell this apart from exhausted retries.
+                    this._otelMetrics.recordEventSkipped(this._topic, eventRegistration.eventTypeName, "partition_key_error");
+                    throw error;
+                }
+                // At pickup, before the scheduler queues the event behind its partition key. Once per delivery:
+                // a replayed event is measured again. Absent on events from producers that predate the stamp,
+                // which go unmeasured.
+                const publishedAt = rawEvent["$publishedAt"];
+                if (typeof publishedAt === "number" && Number.isFinite(publishedAt))
+                    this._otelMetrics.recordEventAge(this._topic, eventRegistration.eventTypeName, (Date.now() - publishedAt) / 1000);
                 await this._broker.route({
                     consumerId: this.id,
                     topic: this._topic,
@@ -263,7 +293,7 @@ export class Consumer {
                     eventId,
                     rawEvent,
                     event,
-                    partitionKey: this._manager.partitionKeyMapper(event),
+                    partitionKey,
                     span
                 });
             });

@@ -8,9 +8,10 @@ import { ATTR_MESSAGING_SYSTEM, ATTR_MESSAGING_OPERATION_TYPE, ATTR_MESSAGING_DE
 /**
  * Writes events to one partition of one topic.
  *
- * The write path: serialize each event (injecting W3C trace context as `$traceData`), deflate the whole batch
- * as a single JSON array, `INCR` the partition's write index to allocate a slot, `SETEX` the compressed blob
- * into that slot with the topic's TTL, and `PUBLISH` a doorbell so an idle consumer wakes immediately.
+ * The write path: serialize each event (injecting W3C trace context as `$traceData` and the publish time as
+ * `$publishedAt`, epoch ms), deflate the whole batch as a single JSON array, `INCR` the partition's write
+ * index to allocate a slot, `SETEX` the compressed blob into that slot with the topic's TTL, and `PUBLISH` a
+ * doorbell so an idle consumer wakes immediately.
  *
  * RULE: one write-index slot holds **one entire `publish()` batch**, not one event. Both Redis calls are
  * separately retried with exponential backoff, and because they are distinct round-trips a consumer can
@@ -46,6 +47,10 @@ export class Producer {
             return;
         const serialized = new Array();
         const spans = new Array();
+        // One stamp for the whole batch: its events become readable together, in one slot. Stamped per event
+        // rather than on the batch because the slot holds a bare array, and wrapping it would change the
+        // wire format older consumers parse. Per-event `$` fields pass through deserialization untouched.
+        const publishedAt = Date.now();
         const tracer = otelApi.trace.getTracer("n-eda");
         events.forEach((event) => {
             const activeSpan = otelApi.trace.getActiveSpan();
@@ -64,6 +69,7 @@ export class Producer {
             otelApi.propagation.inject(otelApi.trace.setSpan(otelApi.context.active(), span), traceData);
             const serializedEvent = event.serialize();
             serializedEvent["$traceData"] = traceData;
+            serializedEvent["$publishedAt"] = publishedAt;
             serialized.push(serializedEvent);
             spans.push(span);
             if (activeSpan)

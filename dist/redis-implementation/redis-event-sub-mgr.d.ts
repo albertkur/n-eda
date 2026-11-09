@@ -15,7 +15,8 @@ import { EdaEvent } from "../eda-event.js";
  * On `consume()` it creates, for every topic that is neither disabled nor publish-only, one `Consumer` and
  * one `Processor` per owned partition — all partitions unless `Topic.configurePartitionAffinity` narrowed
  * the range — plus a `Broker` per topic, process-wide a `Monitor`, and (only when
- * `EdaManager.enableMetrics()` was called) a `MetricsReporter`.
+ * `EdaManager.enableMetrics()` was called) a `MetricsReporter`. It also registers the OpenTelemetry partition
+ * instruments, regardless of `enableMetrics()`.
  *
  * Note: this is the only path that populates `EdaContext`. If every registered topic is publish-only or
  * disabled while a subscription manager is registered, `consume()` throws, because the `Monitor` requires a
@@ -27,6 +28,7 @@ export declare class RedisEventSubMgr implements EventSubMgr {
     private readonly _brokers;
     private _monitor;
     private _metricsReporter;
+    private _unobservePartitions;
     private _isDisposing;
     private _isDisposed;
     private _disposePromise;

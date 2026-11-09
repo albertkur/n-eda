@@ -9,6 +9,8 @@ import { AwsLambdaEventHandler } from "./redis-implementation/aws-lambda-event-h
 import { RpcEventHandler } from "./redis-implementation/rpc-event-handler.js";
 import { GrpcEventHandler } from "./redis-implementation/grpc-event-handler.js";
 import { DefaultEdaContext } from "./eda-context.js";
+import * as otelApi from "@opentelemetry/api";
+import { EdaMetrics } from "./metrics/eda-metrics.js";
 // import { ConsumerTracer } from "./event-handler-tracer";
 /**
  * The root object of an n-eda application: a dependency-injection container wrapper that owns topic and
@@ -54,6 +56,8 @@ export class EdaManager {
     // private readonly _wildKeys: Array<string>;
     _metricsEnabled = false;
     _metricsInterval = Duration.fromMinutes(1);
+    // Replaced in bootstrap(); no-op until then, so nothing can record into a meter taken too early.
+    _otelMetrics = new EdaMetrics(otelApi.createNoopMeter(), null);
     _partitionKeyMapper = null;
     _eventBusRegistered = false;
     _eventSubMgrRegistered = false;
@@ -138,6 +142,14 @@ export class EdaManager {
      * Defaults to one minute; see {@link EdaManager.enableMetrics}.
      */
     get metricsInterval() { return this._metricsInterval; }
+    /**
+     * The OpenTelemetry instruments n-eda records into. Created by `bootstrap()`; a no-op instance before it.
+     *
+     * Note: internal — the consume path records through it. These metrics need no opt-in on the n-eda side;
+     * they are live whenever the host registered a `MeterProvider` before `bootstrap()`. See
+     * `docs/observability.md`.
+     */
+    get otelMetrics() { return this._otelMetrics; }
     /**
      * Creates a manager, optionally sharing an existing DI container.
      *
@@ -538,8 +550,13 @@ export class EdaManager {
      * Finalizes configuration and brings the manager up. **Async since 7.0.0 — always `await` it.**
      *
      * In order: installs the default partition key mapper if none was set; builds the topic lookup map;
-     * bootstraps the container (only if this manager created it); then calls `initialize(this)` on the event
-     * bus, the subscription manager if registered, and any proxy consumer handler.
+     * bootstraps the container (only if this manager created it); takes the `"n-eda"` meter from the global
+     * OpenTelemetry `MeterProvider`; then calls `initialize(this)` on the event bus, the subscription manager
+     * if registered, and any proxy consumer handler.
+     *
+     * Note: register your `MeterProvider` before calling this. The meter taken here is kept for the
+     * manager's lifetime, and if no provider is registered yet it is a no-op meter. That case is logged once,
+     * at info level, through the container's `"Logger"`.
      *
      * After this returns, every configuration method throws.
      *
@@ -568,6 +585,16 @@ export class EdaManager {
         this._topics.map(t => this._topicMap.set(t.name, t));
         if (this._ownsContainer)
             await this._container.bootstrap();
+        // As late as possible: the metrics API hands out a no-op meter, permanently, if no MeterProvider is
+        // registered yet — and a host may register one from code that runs ahead of bootstrap.
+        const meter = otelApi.metrics.getMeter("n-eda");
+        this._otelMetrics = new EdaMetrics(meter, this._consumerGroupId);
+        // The API hands out one shared no-op meter, so identity tells a dead meter apart. Info, not a warning:
+        // a host that does not use OpenTelemetry metrics would otherwise be warned on every start.
+        if (meter === otelApi.createNoopMeter())
+            await this._container.resolve("Logger").logInfo("n-eda: OpenTelemetry metrics are off for "
+                + "this manager's lifetime. No MeterProvider was registered before bootstrap(), or the registered "
+                + "one comes from an @opentelemetry/api version incompatible with n-eda's.");
         this._container.resolve(EdaManager.eventBusKey).initialize(this);
         if (this._eventSubMgrRegistered)
             this._container.resolve(EdaManager.eventSubMgrKey).initialize(this);

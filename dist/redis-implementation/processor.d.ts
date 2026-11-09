@@ -16,10 +16,15 @@ import { WorkItem } from "./scheduler.js";
  *
  * Subclasses supply the actual dispatch: `DefaultProcessor` runs handlers in-process; the proxy processors
  * forward to Lambda, RPC, or gRPC.
+ *
+ * Metrics: every attempt records its duration (`messaging.process.duration`, with `error.type` when it threw),
+ * and every final outcome counts once in `neda.event.processed`. For the proxy processors the duration
+ * includes the network round trip. Nothing is recorded when disposal interrupts an event, because it replays.
  */
 export declare abstract class Processor implements Disposable {
     private readonly _manager;
     private readonly _logger;
+    private readonly _otelMetrics;
     private readonly _availabilityObserver;
     private readonly _doneProcessingObserver;
     private _currentWorkItem;
