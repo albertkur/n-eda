@@ -294,14 +294,14 @@ The **receive** span covers the scheduler queue wait *and* the entire retry ladd
 produces an ~8.5-minute span. The **process** span covers the whole ladder too, without the queue wait.
 
 Metrics go through the meter `"n-eda"`, taken once in `bootstrap()`. The processor times each attempt
-(`messaging.process.duration`) and counts each final outcome (`neda.event.processed`). The consumer
+(`neda.event.process.duration`) and counts each final outcome (`neda.event.processed`). The consumer
 records `neda.event.age` at pickup, and a reading of both indexes on every loop pass, from the MGET it makes
 anyway. `RedisEventSubMgr` registers one callback that reports those readings as the `neda.partition.lag`,
 `neda.partition.lag_peak`, and `neda.partition.sample_age` gauges and the `neda.partition.written` and
 `neda.partition.consumed` counters; they never touch the log reporter's samples, so `enableMetrics()` and its
 interval have no effect on them. The consumer also counts the events it skips
 (`neda.event.skipped`) and the batches it gives up on (`neda.batch.lost`); `RedisEventBus` counts each
-partition write as `messaging.client.sent.messages`, and each event it drops at publish as
+partition write as `neda.event.sent`, and each event it drops at publish as
 `neda.event.dropped`.
 See [docs/observability.md](docs/observability.md).
 

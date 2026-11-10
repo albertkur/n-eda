@@ -5,11 +5,8 @@ import {
     ATTR_MESSAGING_CONSUMER_GROUP_NAME,
     ATTR_MESSAGING_DESTINATION_NAME,
     ATTR_MESSAGING_DESTINATION_PARTITION_ID,
-    ATTR_MESSAGING_OPERATION_NAME,
     ATTR_MESSAGING_SYSTEM,
-    ERROR_TYPE_VALUE_OTHER,
-    METRIC_MESSAGING_CLIENT_SENT_MESSAGES,
-    METRIC_MESSAGING_PROCESS_DURATION
+    ERROR_TYPE_VALUE_OTHER
 } from "@opentelemetry/semantic-conventions/incubating";
 
 
@@ -43,8 +40,8 @@ const eventAgeBuckets = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 6
  * recording below costs next to nothing unless the host registered one first (for example via a preload).
  *
  * RULE: attributes must stay bounded. Topic, consumer group, event type, outcome, skip reason, error class, and
- * partition are each a small closed set; event ids and partition keys are not, and must never become attributes — every
- * distinct value is a new time series for the backend to store and bill.
+ * partition are each a small closed set; event ids and partition keys are not, and must never become
+ * attributes — every distinct value is a new time series for the backend to store and bill.
  *
  * RULE: recording never throws. Every caller sits on a delivery path — inside the consume loop, the route, or
  * the retry ladder — where a thrown error would drop an event, stall a partition, or re-run a handler that
@@ -70,7 +67,7 @@ export class EdaMetrics
     private readonly _partitionConsumed: otelApi.ObservableCounter;
     private readonly _batchesLost: otelApi.Counter;
     private readonly _eventsSkipped: otelApi.Counter;
-    private readonly _messagesSent: otelApi.Counter;
+    private readonly _eventsSent: otelApi.Counter;
     private readonly _eventsDropped: otelApi.Counter;
     // topic -> partition -> the most recent index reading, when it was taken, and the highest lag since the last
     // collection. The partition instruments read only these, never the log reporter's samples.
@@ -90,7 +87,7 @@ export class EdaMetrics
         given(consumerGroupId as string, "consumerGroupId").ensureIsString();
         this._consumerGroupId = consumerGroupId;
 
-        this._processDuration = meter.createHistogram(METRIC_MESSAGING_PROCESS_DURATION, {
+        this._processDuration = meter.createHistogram("neda.event.process.duration", {
             description: "Duration of one attempt to process an event, excluding the delays between retries.",
             unit: "s",
             advice: { explicitBucketBoundaries: processDurationBuckets }
@@ -152,9 +149,9 @@ export class EdaMetrics
             valueType: otelApi.ValueType.INT
         });
 
-        this._messagesSent = meter.createCounter(METRIC_MESSAGING_CLIENT_SENT_MESSAGES, {
+        this._eventsSent = meter.createCounter("neda.event.sent", {
             description: "Events the producer attempted to write to a partition; failed writes carry error.type.",
-            unit: "{message}",
+            unit: "{event}",
             valueType: otelApi.ValueType.INT
         });
 
@@ -180,10 +177,7 @@ export class EdaMetrics
         {
             const attributes = this._eventAttributes(topic, eventType);
 
-            this._processDuration.record(durationSeconds, {
-                ...attributes,
-                [ATTR_MESSAGING_OPERATION_NAME]: "process"
-            });
+            this._processDuration.record(durationSeconds, attributes);
             this._processed.add(1, { ...attributes, [outcomeAttribute]: "success" });
         }
         catch (error)
@@ -208,7 +202,6 @@ export class EdaMetrics
         {
             this._processDuration.record(durationSeconds, {
                 ...this._eventAttributes(topic, eventType),
-                [ATTR_MESSAGING_OPERATION_NAME]: "process",
                 [ATTR_ERROR_TYPE]: errorTypeOf(error)
             });
         }
@@ -309,7 +302,7 @@ export class EdaMetrics
     {
         try
         {
-            this._addPerEventType(this._messagesSent, topic, eventTypes, {});
+            this._addPerEventType(this._eventsSent, topic, eventTypes, {});
         }
         catch (error)
         {
@@ -329,7 +322,7 @@ export class EdaMetrics
     {
         try
         {
-            this._addPerEventType(this._messagesSent, topic, eventTypes, { [ATTR_ERROR_TYPE]: errorTypeOf(error) });
+            this._addPerEventType(this._eventsSent, topic, eventTypes, { [ATTR_ERROR_TYPE]: errorTypeOf(error) });
         }
         catch (recordingError)
         {
@@ -448,7 +441,6 @@ export class EdaMetrics
         counts.forEach((count, eventType) =>
             counter.add(count, {
                 ...this._producerAttributes(topic, eventType),
-                [ATTR_MESSAGING_OPERATION_NAME]: "send",
                 ...attributes
             }));
     }

@@ -28,6 +28,10 @@ import { Producer } from "./producer.js";
  *
  * Note: `dispose()` drains for a few seconds and flips a flag — it does **not** close the Redis client.
  * Register a `Disposable` alongside the client so the connection is actually torn down.
+ *
+ * Metrics: each partition write counts its events in `neda.event.sent` (with `error.type` when
+ * it fails after its retries), and each event dropped at publish for lack of a local handler counts in
+ * `neda.event.dropped`. See `docs/observability.md`.
  */
 @inject("EdaRedisClient")
 export class RedisEventBus implements EventBus

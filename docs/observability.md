@@ -2,9 +2,10 @@
 
 n-eda reports metrics through two independent channels:
 
-- **[OpenTelemetry instruments](#opentelemetry-metrics)** — handler latency, outcomes, event age, and
-  per-partition lag, recorded through the OpenTelemetry metrics API. Live whenever the host registers a
-  `MeterProvider` before `bootstrap()`; there is no n-eda switch.
+- **[OpenTelemetry instruments](#opentelemetry-metrics)** — handler latency and outcomes, event age,
+  per-partition lag and throughput, lost and skipped events, and what was published or dropped, recorded
+  through the OpenTelemetry metrics API. Live whenever the host registers a `MeterProvider` before
+  `bootstrap()`; there is no n-eda switch.
 - **[Log-based partition metrics](#log-based-partition-metrics)** — per-partition lag and throughput as
   structured log lines, for a log pipeline to turn into dashboard metrics. Opt-in via `enableMetrics()`.
 
@@ -20,31 +21,50 @@ n-strument (`node --import @nivinjoseph/n-strument`), which always registers one
 registered when `bootstrap()` runs, the OpenTelemetry API hands n-eda a no-op meter for good, every recording
 below costs next to nothing, and `bootstrap()` says so in one info-level log line.
 
-The provider's resource must identify the process, typically with `service.instance.id`. Replicas of one
-consumer group emit the per-event instruments with identical attributes, so without it their cumulative
-series merge into one, and the backend reads the interleaved totals as constant counter resets. The partition
-gauges are spared only because replicas own disjoint partitions.
+Each process's series must be distinguishable from every other's. n-eda's metrics carry no process identity,
+so two processes with the same `service.name`, consuming the same topic in the same consumer group and
+reporting through one collector, would send identical series whose running totals merge. Running one
+consumer per consumer group, or deploying partition-affinity consumers as separately named services, rules
+that out, and so does n-strument's assumption of one collector or agent per process. Outside both, add
+`service.instance.id` to the resource.
 
-These instruments do not depend on `enableMetrics()`. The partition gauges report the consume loop's own
-lag readings, taken on every pass; they never read the log reporter's samples, so its interval has no
+These instruments do not depend on `enableMetrics()`. The partition instruments report the consume loop's own
+index readings, taken on every pass; they never read the log reporter's samples, so its interval has no
 effect on them.
 
 ### Instruments
 
-| Instrument | Type | Unit | Recorded |
+Twelve instruments, in three groups by where they are recorded.
+
+**Handling events.** Recorded by the consuming process: per handler attempt, or once per delivery. Tagged with
+topic, consumer group, and event type.
+
+| Instrument | Type | Unit | Measures |
 |---|---|---|---|
-| `messaging.process.duration` | histogram | `s` | Once per processing **attempt**: the handler's duration, excluding the sleeps between retries. Under the Lambda, RPC, and gRPC proxies it includes the network round trip. |
-| `neda.event.processed` | counter | `{event}` | Once per delivery, at its final outcome: `neda.outcome` is `success`, or `failed` once all 10 attempts are exhausted. |
-| `neda.event.age` | histogram | `s` | Once per delivery, when a consumer picks the event up: pickup time minus publish time. |
-| `neda.partition.lag` | observable gauge | `{batch}` | At every collection: the latest lag the partition's consume loop read — publish batches this consumer group has yet to read. |
-| `neda.partition.lag_peak` | observable gauge | `{batch}` | At every collection: the highest lag the partition's consume loop read since the previous collection. The loop reads it on every pass (every 2.5–5 s when idle, every batch when busy). |
-| `neda.partition.sample_age` | observable gauge | `s` | At every collection: how long ago the partition's consume loop last read its lag. |
-| `neda.partition.written` | observable counter | `{batch}` | At every collection: the partition's write index, the batches ever written to it. Its rate is the production rate. |
-| `neda.partition.consumed` | observable counter | `{batch}` | At every collection: this consumer group's read index, the batches it has consumed. Its rate is the consumption rate. |
-| `neda.batch.lost` | counter | `{batch}` | Each time a consumer gives up on a slot whose payload never appeared after 200 reads (about 42 s). That batch's events are lost. |
-| `neda.event.skipped` | counter | `{event}` | Each event a consumer passed over without handling it, by `neda.skip.reason`: `duplicate`, `no_handler`, or `partition_key_error`. |
-| `messaging.client.sent.messages` | counter | `{message}` | Each event `publish()` wrote to a partition, counted by the publishing process once stored. A write that failed after its retries carries `error.type`. |
-| `neda.event.dropped` | counter | `{event}` | Each event `publish()` discarded unsent: this process has no handler for its type, and the topic is not forced. |
+| `neda.event.process.duration` | histogram | `s` | How long each handler **attempt** took, excluding the sleeps between retries; failed attempts carry `error.type`. Under the Lambda, RPC, and gRPC proxies it includes the network round trip. |
+| `neda.event.processed` | counter | `{event}` | Final outcomes: `neda.outcome` is `success`, or `failed` once all 10 attempts are exhausted. |
+| `neda.event.age` | histogram | `s` | How long an event waited between publish and consumer pickup. |
+| `neda.event.skipped` | counter | `{event}` | Events passed over without handling, by `neda.skip.reason`: `duplicate`, `no_handler`, or `partition_key_error`. |
+
+**Per partition.** Read on every pass of the consume loop (every 2.5–5 s when idle, every batch when busy),
+and reported at each collection. Tagged with topic, consumer group, and partition.
+
+| Instrument | Type | Unit | Measures |
+|---|---|---|---|
+| `neda.partition.lag` | observable gauge | `{batch}` | Current lag: publish batches this consumer group has yet to read. |
+| `neda.partition.lag_peak` | observable gauge | `{batch}` | The highest lag read since the previous collection, so a spike that drained still shows. |
+| `neda.partition.sample_age` | observable gauge | `s` | Time since the loop last read the partition; climbs when it is stuck. |
+| `neda.partition.written` | observable counter | `{batch}` | The write index, the batches ever written. Its rate is the production rate. |
+| `neda.partition.consumed` | observable counter | `{batch}` | This group's read index, the batches it has consumed. Its rate is the consumption rate. |
+| `neda.batch.lost` | counter | `{batch}` | Slots given up on after 200 reads (about 42 s) because the payload never appeared: lost events. |
+
+**Publishing.** Recorded by the publishing process, in `publish()`. Tagged with topic and event type, but no
+consumer group.
+
+| Instrument | Type | Unit | Measures |
+|---|---|---|---|
+| `neda.event.sent` | counter | `{event}` | Events written to a partition, counted once stored; a write that failed after its retries carries `error.type`. |
+| `neda.event.dropped` | counter | `{event}` | Events discarded unsent: this process has no handler for their type, and the topic is not forced. |
 
 The two per-event counts are per **delivery**, not per event. Delivery is at least once, so one event can be
 picked up twice:
@@ -58,8 +78,9 @@ picked up twice:
 - **After a crash**, everything read since the consumer's last completed batch is replayed, including events
   that were already handled. Both their age and their outcome are counted twice.
 
-`messaging.process.duration` is the OpenTelemetry semantic-convention name, so dashboards built for other
-messaging systems read it as-is.
+Every metric name is under `neda.`. The attributes follow OpenTelemetry's messaging conventions
+(`messaging.system`, `messaging.destination.name`, `messaging.consumer.group.name`, `error.type`) wherever
+one fits, and use `neda.` for the rest.
 
 Histogram bucket boundaries are supplied as advice:
 
@@ -72,24 +93,24 @@ A view configured on your `MeterProvider` overrides them.
 
 ### Attributes
 
-The consumer's per-event instruments (`messaging.process.duration`, `neda.event.processed`, `neda.event.age`,
+The consumer's per-event instruments (`neda.event.process.duration`, `neda.event.processed`, `neda.event.age`,
 and `neda.event.skipped`) carry:
 
 | Attribute | Value |
 |---|---|
 | `messaging.system` | `n-eda` |
-| `messaging.destination.name` | The topic name. Spans use `topic+++partition`; metrics use the topic alone, because a partition here would multiply every per-event series by the partition count. The gauges below carry the partition. |
+| `messaging.destination.name` | The topic name. Spans use `topic+++partition`; metrics use the topic alone, because a partition here would multiply every per-event series by the partition count. The partition instruments below carry it. |
 | `messaging.consumer.group.name` | The consumer group from `registerEventSubscriptionManager`. |
 | `neda.event.type` | The handled event's type name. For a distributed observer notification, this is the **observed** event's type, not `NedaDistributedObserverNotifyEvent`. |
 
-`messaging.process.duration` adds `messaging.operation.name` = `process`, and, on a failed attempt,
-`error.type` = the thrown error's class name (`_OTHER` for a thrown non-object). `neda.event.processed`
+`neda.event.process.duration` adds, on a failed attempt, `error.type` = the thrown error's class name
+(`_OTHER` for a thrown non-object). `neda.event.processed`
 adds `neda.outcome`, and `neda.event.skipped` adds `neda.skip.reason`.
 
-The producer-side counters (`messaging.client.sent.messages` and `neda.event.dropped`) carry
+The producer-side counters (`neda.event.sent` and `neda.event.dropped`) carry
 `messaging.system`, `messaging.destination.name`, and `neda.event.type`, but no consumer group: publishing is
-not done on behalf of one, even in a process that also consumes. `messaging.client.sent.messages` adds
-`messaging.operation.name` = `send`, and `error.type` on a failed write.
+not done on behalf of one, even in a process that also consumes. `neda.event.sent` adds
+`error.type` on a failed write.
 
 The partition instruments (three gauges, two counters, and `neda.batch.lost`) carry `messaging.system`,
 `messaging.destination.name`, `messaging.consumer.group.name`, and `messaging.destination.partition.id` (the
@@ -98,7 +119,7 @@ is the same for every group reading a partition, since each group's consumer rep
 
 Event ids and partition keys are never attributes: each distinct value would be a new time series.
 Per-event series grow as roughly **topics × event types × outcomes** (or error classes, for the duration
-histogram). That is fine for tens of event types per topic. Hundreds would call for dropping
+histogram, and skip reasons). That is fine for tens of event types per topic. Hundreds would call for dropping
 `neda.event.type` with a view.
 
 ### Under a proxy
@@ -120,13 +141,31 @@ The proxied side records nothing. `AwsLambdaEventHandler`, `RpcEventHandler`, an
 handler directly, so the processing side's metrics, whose durations include the network round trip, are the
 only ones there are.
 
+### What each one is for
+
+Every instrument answers a question no other one does. Where two overlap, the overlap is noted.
+
+| Instrument | Its job | Overlap |
+|---|---|---|
+| `neda.event.process.duration` | Handler latency, and what failing attempts threw | — |
+| `neda.event.processed` | The only count of events dropped after all their retries | Its `success` count equals the duration histogram's successful attempts; it is kept as one cheap counter that is easier to query |
+| `neda.event.age` | The delay users feel, from publish to pickup | — |
+| `neda.partition.lag` | Current backlog per partition | In Prometheus it equals `written − consumed`. Datadog stores counters as per-interval counts, so there the gauge is the only way to see it |
+| `neda.partition.lag_peak` | Spikes that drain between two pushes | — |
+| `neda.partition.sample_age` | A stuck consume loop | — |
+| `neda.partition.written` / `neda.partition.consumed` | Production and consumption rates | The log-based `productionRate` and `consumptionRate`, while `enableMetrics()` is still on |
+| `neda.batch.lost` | Data loss | — |
+| `neda.event.skipped` | Events delivered but never handled, and why | — |
+| `neda.event.sent` | Events published per type, and publish failures | For a topic read by one consumer group, it should equal `processed` + `skipped` once everything is delivered; a gap means lost events, or replays counted twice |
+| `neda.event.dropped` | Events silently discarded at publish | — |
+
 ### Reading them
 
-- **Failure rate.** Divide the count of `messaging.process.duration` points that carry `error.type` by the
+- **Failure rate.** Divide the count of `neda.event.process.duration` points that carry `error.type` by the
   total count. Group by `error.type` to see what is failing.
 - **Events that exhausted their retries.** `neda.event.processed{neda.outcome="failed"}` counts events
-  dropped after all 10 attempts. There is no dead-letter queue, so this count is the only place those events show up as a
-  number.
+  dropped after all 10 attempts. There is no dead-letter queue, so this count is the only place those events
+  show up as a number.
 - **Event age** is computed from `$publishedAt`, an epoch-ms stamp the producer writes onto every event
   (one value per `publish()` call). A few limits apply:
   - Events from producers on an n-eda version that predates the stamp carry no `$publishedAt`, so they are
@@ -153,10 +192,10 @@ only ones there are.
   idle, every batch when busy. A loop blocked mid-batch, typically by a handler sitting in its retry
   ladder, stops reading it. `neda.partition.lag` and `neda.partition.lag_peak` then freeze and
   `neda.partition.sample_age` climbs. An idle loop keeps `sample_age` under about 5 s and a busy one holds it
-  only as long as a batch takes, so alert when it stays above a couple of minutes.
-- A partition appears in the gauges after its consume loop's first pass, and only on the process that owns
-  it.
-
+  only as long as a batch takes, so alert when it stays above a couple of minutes. A process that dies stops
+  reporting instead: its partitions' series simply end, so alert on missing data too.
+- A partition appears in the partition instruments after its consume loop's first pass, and only on the
+  process that owns it.
 - **Lost data.** Any increase in `neda.batch.lost` means events are gone: a slot was allocated but its
   payload never arrived, because a producer failed between its two Redis calls, or the payload expired
   under the topic's TTL before this group read it. A partition lagging by more than its TTL loses data
@@ -164,12 +203,29 @@ only ones there are.
 - **Skipped events.** `duplicate` rises on the replays after a shutdown or crash, and is expected then.
   `no_handler` rises during a rolling deploy, while this consumer runs a build that lacks a handler the
   publisher has. `partition_key_error` means `partitionKeyMapper` throws on some events, which is a bug.
-- **Publishing.** `messaging.client.sent.messages` counts events per type from the publishing process, where
+- **Publishing.** `neda.event.sent` counts events per type from the publishing process, where
   `neda.partition.written` counts batches from the consumer's side. Its `error.type` points are publish
   failures, which also throw to the caller. `neda.event.dropped` catches the silent case: a service
   publishing events it does not handle itself, to a topic without `.forcePublish()`, sends nothing at all.
 
+### What to alert on
+
+| Signal | Condition | Means |
+|---|---|---|
+| `neda.batch.lost` | any increase | Events lost: a payload never arrived, or expired under the TTL |
+| `neda.partition.sample_age` | above a couple of minutes, or no data | A stuck consume loop, or a dead consumer |
+| `neda.event.processed{neda.outcome="failed"}` | any increase | Events dropped after all their retries |
+| `neda.event.sent` with `error.type` | any | Publishes failing after their retries |
+| `neda.event.skipped{neda.skip.reason="partition_key_error"}` | any | `partitionKeyMapper` throws on some events |
+| `neda.partition.lag` | above a per-topic threshold | Falling behind; set the threshold once normal levels are known |
+
 ### Datadog
+
+The Datadog agent turns `service.name` into the `service` tag and `service.version` into `version`; Grafana's
+Prometheus shows the same `service.name` as the `job` label instead. n-eda's attributes arrive as tags under
+their dotted names. n-strument's resource has no `deployment.environment`, so check that the `env` tag comes
+through from the agent's own configuration. Counters arrive as per-interval counts, so use `.as_rate()` for
+rates; the absolute indexes are not visible there, which is one reason lag is a gauge of its own.
 
 `neda.partition.lag` is the lag metric; the log-based setup below no longer generates one. If an older
 setup created a log-based `neda.partition.lag` in Datadog (the setup documented up to 7.0.5 did), delete it

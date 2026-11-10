@@ -98,13 +98,13 @@ await describe("OpenTelemetry metrics tests", async () =>
 
             const collected = await pipeline.collect();
 
-            assert.strictEqual(collected.find("messaging.process.duration")!.descriptor.unit, "s");
+            assert.strictEqual(collected.find("neda.event.process.duration")!.descriptor.unit, "s");
 
-            const points = collected.points<Histogram>("messaging.process.duration");
+            const points = collected.points<Histogram>("neda.event.process.duration");
             assert.strictEqual(points.length, 1);
 
             const [point] = points;
-            assert.deepStrictEqual(point.attributes, { ...sharedAttributes, "messaging.operation.name": "process" });
+            assert.deepStrictEqual(point.attributes, sharedAttributes);
             assert.strictEqual(point.value.count, 1);
             assert.strictEqual(point.value.sum, 0.2);
             // Bucket advice reached the SDK — the defaults are millisecond-sized and would misfile seconds.
@@ -128,10 +128,10 @@ await describe("OpenTelemetry metrics tests", async () =>
 
             const collected = await pipeline.collect();
 
-            assert.strictEqual(collected.histogramCount("messaging.process.duration",
+            assert.strictEqual(collected.histogramCount("neda.event.process.duration",
                 { "error.type": "ApplicationException" }), 1);
             // A thrown non-object has no class name to report.
-            assert.strictEqual(collected.histogramCount("messaging.process.duration", { "error.type": "_OTHER" }), 1);
+            assert.strictEqual(collected.histogramCount("neda.event.process.duration", { "error.type": "_OTHER" }), 1);
             // An attempt failure may still be retried, so it is not a final outcome.
             assert.strictEqual(collected.count("neda.event.processed"), 0);
 
@@ -147,7 +147,7 @@ await describe("OpenTelemetry metrics tests", async () =>
 
             assert.deepStrictEqual(collected.points("neda.event.processed").map(t => [t.attributes, t.value]),
                 [[{ ...sharedAttributes, "neda.outcome": "failed" }, 1]]);
-            assert.strictEqual(collected.find("messaging.process.duration")?.dataPoints.length ?? 0, 0);
+            assert.strictEqual(collected.find("neda.event.process.duration")?.dataPoints.length ?? 0, 0);
 
             await pipeline.shutdown();
         });
@@ -223,7 +223,7 @@ await describe("OpenTelemetry metrics tests", async () =>
             new EdaMetrics(pipeline.meter(), "billing").recordAttemptFailure("orders", "OrderPlaced", 0.1, unreadable);
 
             const collected = await pipeline.collect();
-            assert.strictEqual(collected.histogramCount("messaging.process.duration", { "error.type": "_OTHER" }), 1);
+            assert.strictEqual(collected.histogramCount("neda.event.process.duration", { "error.type": "_OTHER" }), 1);
 
             await pipeline.shutdown();
         });
@@ -240,7 +240,6 @@ await describe("OpenTelemetry metrics tests", async () =>
         const ordersSend = {
             "messaging.system": "n-eda",
             "messaging.destination.name": "orders",
-            "messaging.operation.name": "send",
             "neda.event.type": "OrderPlaced"
         };
 
@@ -291,16 +290,16 @@ await describe("OpenTelemetry metrics tests", async () =>
                 edaMetrics.recordEventsSendFailed("orders", ["OrderPlaced"], new ApplicationException("down"));
 
                 const collected = await pipeline.collect();
-                assert.strictEqual(collected.find("messaging.client.sent.messages")!.descriptor.unit, "{message}");
+                assert.strictEqual(collected.find("neda.event.sent")!.descriptor.unit, "{event}");
 
-                const sent = collected.points("messaging.client.sent.messages");
+                const sent = collected.points("neda.event.sent");
                 assert.deepStrictEqual(
                     sent.map(p => [p.attributes["neda.event.type"], p.attributes["error.type"] ?? null, p.value])
                         .orderBy(p => `${p[0]}-${p[1]}`),
                     [["OrderPlaced", "ApplicationException", 1], ["OrderPlaced", null, 2], ["OrderShipped", null, 1]]);
                 sent.forEach(p => assert.ok(!("messaging.consumer.group.name" in p.attributes)));
                 assert.deepStrictEqual(
-                    collected.points("messaging.client.sent.messages", ordersSend)
+                    collected.points("neda.event.sent", ordersSend)
                         .find(p => p.attributes["error.type"] == null)!.attributes,
                     ordersSend);
 
@@ -531,7 +530,7 @@ await describe("OpenTelemetry metrics tests", async () =>
             const topic = { "messaging.destination.name": "processor-success" };
             const collected = await globalPipeline.collect();
 
-            const [duration] = collected.points<Histogram>("messaging.process.duration", topic);
+            const [duration] = collected.points<Histogram>("neda.event.process.duration", topic);
             assert.strictEqual(duration.value.count, 1);
             assert.strictEqual(duration.attributes["error.type"], undefined);
             assert.strictEqual(duration.attributes["neda.event.type"], "OrderPlaced");
@@ -550,7 +549,7 @@ await describe("OpenTelemetry metrics tests", async () =>
             const topic = { "messaging.destination.name": "processor-retry" };
             const collected = await globalPipeline.collect();
 
-            const attempts = collected.points<Histogram>("messaging.process.duration", topic);
+            const attempts = collected.points<Histogram>("neda.event.process.duration", topic);
             assert.deepStrictEqual(
                 attempts.map(t => [t.attributes["error.type"] ?? null, t.value.count]).orderBy(t => `${t[0]}`),
                 [["ApplicationException", 1], [null, 1]]);

@@ -531,16 +531,16 @@ n-eda also records metrics under the meter name `"n-eda"`:
 
 | Instrument | Type | What it answers |
 |---|---|---|
-| `messaging.process.duration` | histogram, seconds | Handler latency per attempt; failed attempts carry `error.type` |
+| `neda.event.process.duration` | histogram, seconds | Handler latency per attempt; failed attempts carry `error.type` |
 | `neda.event.processed` | counter | Final outcomes; `neda.outcome="failed"` counts events dropped after their retries |
 | `neda.event.age` | histogram, seconds | How long an event waited between publish and consumer pickup |
 | `neda.partition.lag` | observable gauge, batches | Lag per partition |
 | `neda.partition.lag_peak` | observable gauge, batches | The highest lag since the previous collection, even if it drained before then |
 | `neda.partition.sample_age` | observable gauge, seconds | How stale that lag figure is; climbs while a partition is stuck |
 | `neda.partition.written` / `neda.partition.consumed` | observable counters, batches | Write and read index per partition; their rates are the production and consumption rates |
-| `neda.batch.lost` | counter, batches | Batches whose payload never arrived: lost events. Alert on any increase |
+| `neda.batch.lost` | counter, batches | Batches whose payload never arrived or expired: lost events. Alert on any increase |
 | `neda.event.skipped` | counter | Events a consumer passed over, by `neda.skip.reason`: `duplicate`, `no_handler`, `partition_key_error` |
-| `messaging.client.sent.messages` | counter | Events published, per type, from the publishing process; failed writes carry `error.type` |
+| `neda.event.sent` | counter | Events published, per type, from the publishing process; failed writes carry `error.type` |
 | `neda.event.dropped` | counter | Events `publish()` discarded because this process has no handler for them and the topic isn't forced |
 
 They need no n-eda opt-in, but `bootstrap()` takes the meter **once**: register your `MeterProvider`

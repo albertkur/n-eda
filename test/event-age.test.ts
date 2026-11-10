@@ -238,7 +238,7 @@ await describe("event age tests", async () =>
         const baseline = await pipeline.collect();
         const agesBefore = baseline.histogramCount("neda.event.age", topicAttributes);
         const sentAttributes = { ...topicAttributes, "neda.event.type": "AgeTestEvent" };
-        const sentBefore = baseline.count("messaging.client.sent.messages", sentAttributes);
+        const sentBefore = baseline.count("neda.event.sent", sentAttributes);
         const processedBefore = await processedCount();
 
         const id = `stamped-${runId}`;
@@ -248,8 +248,8 @@ await describe("event age tests", async () =>
 
         assert.ok(handledIds.has(id));
         assert.strictEqual(collected.histogramCount("neda.event.age", topicAttributes) - agesBefore, 1);
-        assert.strictEqual(collected.count("messaging.client.sent.messages", sentAttributes) - sentBefore, 1);
-        assert.ok(collected.points("messaging.client.sent.messages", sentAttributes)
+        assert.strictEqual(collected.count("neda.event.sent", sentAttributes) - sentBefore, 1);
+        assert.ok(collected.points("neda.event.sent", sentAttributes)
             .every(p => p.attributes["error.type"] == null));
 
         const [age] = collected.points<Histogram>("neda.event.age", topicAttributes);
@@ -286,7 +286,7 @@ await describe("event age tests", async () =>
         // Counted at publish() itself, so it is there as soon as publish() returns; and nothing was sent.
         const collected = await pipeline.collect();
         assert.strictEqual(collected.count("neda.event.dropped", droppedAttributes) - droppedBefore, 1);
-        assert.strictEqual(collected.count("messaging.client.sent.messages", droppedAttributes), 0);
+        assert.strictEqual(collected.count("neda.event.sent", droppedAttributes), 0);
     });
 
     await test("a consumer counts each event it skips, by reason", async () =>
