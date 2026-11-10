@@ -54,8 +54,8 @@ and reported at each collection. Tagged with topic, consumer group, and partitio
 | `neda.partition.lag` | observable gauge | `{batch}` | Current lag: publish batches this consumer group has yet to read. |
 | `neda.partition.lag_peak` | observable gauge | `{batch}` | The highest lag read since the previous collection, so a spike that drained still shows. |
 | `neda.partition.sample_age` | observable gauge | `s` | Time since the loop last read the partition; climbs when it is stuck. |
-| `neda.partition.written` | observable counter | `{batch}` | The write index, the batches ever written. Its rate is the production rate. |
-| `neda.partition.consumed` | observable counter | `{batch}` | This group's read index, the batches it has consumed. Its rate is the consumption rate. |
+| `neda.partition.written` | observable counter | `{batch}` | Batches written to the partition since this process first read it. Its rate is the production rate. |
+| `neda.partition.consumed` | observable counter | `{batch}` | Batches this group consumed from the partition since this process first read it. Its rate is the consumption rate. |
 | `neda.batch.lost` | counter | `{batch}` | Slots given up on after 200 reads (about 42 s) because the payload never appeared: lost events. |
 
 **Publishing.** Recorded by the publishing process, in `publish()`. Tagged with topic and event type, but no
@@ -150,13 +150,13 @@ Every instrument answers a question no other one does. Where two overlap, the ov
 | `neda.event.process.duration` | Handler latency, and what failing attempts threw | — |
 | `neda.event.processed` | The only count of events dropped after all their retries | Its `success` count equals the duration histogram's successful attempts; it is kept as one cheap counter that is easier to query |
 | `neda.event.age` | The delay users feel, from publish to pickup | — |
-| `neda.partition.lag` | Current backlog per partition | In Prometheus it equals `written − consumed`. Datadog stores counters as per-interval counts, so there the gauge is the only way to see it |
+| `neda.partition.lag` | Current backlog per partition | The two counters start at 0 in each process, so `written − consumed` is not the lag; the gauge is the only measure of the backlog |
 | `neda.partition.lag_peak` | Spikes that drain between two pushes | — |
 | `neda.partition.sample_age` | A stuck consume loop | — |
 | `neda.partition.written` / `neda.partition.consumed` | Production and consumption rates | The log-based `productionRate` and `consumptionRate`, while `enableMetrics()` is still on |
 | `neda.batch.lost` | Data loss | — |
 | `neda.event.skipped` | Events delivered but never handled, and why | — |
-| `neda.event.sent` | Events published per type, and publish failures | For a topic read by one consumer group, it should equal `processed` + `skipped` once everything is delivered; a gap means lost events, or replays counted twice |
+| `neda.event.sent` | Events published per type, and publish failures | For a topic read by one consumer group, it should equal `processed` + `skipped` once everything is delivered; a gap means lost events, or replays counted twice. Not for a `flushConsume()` topic, whose consumers discard events without counting them |
 | `neda.event.dropped` | Events silently discarded at publish | — |
 
 ### Reading them
@@ -179,8 +179,10 @@ Every instrument answers a question no other one does. Where two overlap, the ov
 - **Production and consumption rates.** The backend derives them from the two counters; n-eda never
   precomputes a rate. In Grafana, `rate(neda_partition_written_total[5m])` and
   `rate(neda_partition_consumed_total[5m])` (the OTLP conversion typically adds `_total`; check the name in
-  Explore). In Datadog, `.as_rate()` on `neda.partition.written` and `neda.partition.consumed`. A Redis flush
-  drops the indexes, which both backends read as a counter reset rather than a negative rate.
+  Explore). In Datadog, `.as_rate()` on `neda.partition.written` and `neda.partition.consumed`. The counters
+  are not the Redis indexes: each starts at 0 on the partition's first reading in the process, so a restart
+  does not replay the index's history as one huge interval. A Redis flush restarts the indexes from 0, and
+  the counters keep counting from there rather than going back.
 - **Peak lag.** The lag gauge reports only the lag current at each collection, so a spike that drains
   before then never shows on it. `neda.partition.lag_peak` reports the highest lag the consume loop read
   since the previous collection, exactly, under either temporality: with a 60 s export, each point is that
@@ -225,7 +227,7 @@ The Datadog agent turns `service.name` into the `service` tag and `service.versi
 Prometheus shows the same `service.name` as the `job` label instead. n-eda's attributes arrive as tags under
 their dotted names. n-strument's resource has no `deployment.environment`, so check that the `env` tag comes
 through from the agent's own configuration. Counters arrive as per-interval counts, so use `.as_rate()` for
-rates; the absolute indexes are not visible there, which is one reason lag is a gauge of its own.
+rates. The counters never carry the absolute indexes, which is why lag is a gauge of its own.
 
 `neda.partition.lag` is the lag metric; the log-based setup below no longer generates one. If an older
 setup created a log-based `neda.partition.lag` in Datadog (the setup documented up to 7.0.5 did), delete it
@@ -263,7 +265,7 @@ Each line's message is a flat JSON object:
 | `partition` | Partition number within the topic. |
 | `consumerGroupId` | The consumer group whose read offset produced `readIndex`, `lag`, and `consumptionRate` (from `registerEventSubscriptionManager`). Distinct groups consuming the same topic report independent figures. |
 | `consumerName` | Instance label from `useConsumerName` (`UNNAMED` if never set). When one group is scaled across replicas with disjoint partition-affinity ranges, this is what identifies which instance reported the line. |
-| `lag` | `writeIndex - readIndex`, clamped at `0` — publish batches this consumer group is behind. **The number you alert on.** |
+| `lag` | `writeIndex - readIndex`, clamped at `0` — publish batches this consumer group is behind. To alert on lag, use the OpenTelemetry `neda.partition.lag` gauge (see [Alerting](#5-alerting)). |
 | `writeIndex` | The producer's current slot counter. |
 | `readIndex` | This consumer group's current offset. |
 | `productionRate` | Batches written per minute, two decimals. `0` when there is no usable baseline: a partition's first report, or an index that regressed (Redis flush/eviction). |
@@ -363,7 +365,8 @@ provides `count`, `min`, `max`, `sum`, and `avg` aggregations, with optional per
 | `@logType:n-eda.partition-metrics` | `@consumptionRate` | `neda.partition.consumption_rate` | `@topic`, `@partition` |
 
 Lag is deliberately not generated here: it comes from the OpenTelemetry `neda.partition.lag` gauge, and a
-log-based metric under that name would collide with it.
+log-based metric under that name would collide with it. A service that runs without a `MeterProvider` can
+still generate a lag distribution from `@lag` the same way, under any other name.
 
 Query the distributions with `avg`. Because a tick may re-log an unrefreshed record, duplicates appear as
 extra identical samples — harmless to `avg`, which is exactly why the payload carries normalized rates

@@ -16,6 +16,10 @@ import { Broker } from "./broker.js";
  *
  * Note: a slot whose payload has not landed yet is retried up to 200 times (≈42 s) — this absorbs the race
  * between the producer's `INCR` and its `SETEX`, which are separate round-trips.
+ *
+ * Metrics: every pass records both indexes for the partition instruments; each event picked up records its
+ * `neda.event.age`; each event skipped, and each slot given up on, counts in `neda.event.skipped` and
+ * `neda.batch.lost`. See `docs/observability.md`.
  */
 export declare class Consumer implements Disposable {
     private readonly _edaPrefix;

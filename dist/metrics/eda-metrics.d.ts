@@ -14,8 +14,8 @@ export type SkipReason = "duplicate" | "no_handler" | "partition_key_error";
  * recording below costs next to nothing unless the host registered one first (for example via a preload).
  *
  * RULE: attributes must stay bounded. Topic, consumer group, event type, outcome, skip reason, error class, and
- * partition are each a small closed set; event ids and partition keys are not, and must never become attributes — every
- * distinct value is a new time series for the backend to store and bill.
+ * partition are each a small closed set; event ids and partition keys are not, and must never become
+ * attributes — every distinct value is a new time series for the backend to store and bill.
  *
  * RULE: recording never throws. Every caller sits on a delivery path — inside the consume loop, the route, or
  * the retry ladder — where a thrown error would drop an event, stall a partition, or re-run a handler that
@@ -40,7 +40,7 @@ export declare class EdaMetrics {
     private readonly _partitionConsumed;
     private readonly _batchesLost;
     private readonly _eventsSkipped;
-    private readonly _messagesSent;
+    private readonly _eventsSent;
     private readonly _eventsDropped;
     private readonly _partitionReadings;
     /**
@@ -132,7 +132,8 @@ export declare class EdaMetrics {
     /**
      * Records one reading of a partition's indexes, as taken on every pass of its consume loop. Every partition
      * instrument reads from these:
-     * - `neda.partition.written` and `neda.partition.consumed` are the latest write and read index;
+     * - `neda.partition.written` and `neda.partition.consumed` are how far the write and read index have moved
+     * since the partition's first reading in this process;
      * - `neda.partition.lag` is the latest lag, and `neda.partition.lag_peak` the highest since the previous
      * collection — what the lag gauge cannot show, a spike that subsides between two collections;
      * - `neda.partition.sample_age` is the time since the latest reading.

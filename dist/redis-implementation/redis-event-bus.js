@@ -24,6 +24,10 @@ import { Producer } from "./producer.js";
  *
  * Note: `dispose()` drains for a few seconds and flips a flag — it does **not** close the Redis client.
  * Register a `Disposable` alongside the client so the connection is actually torn down.
+ *
+ * Metrics: each partition write counts its events in `neda.event.sent` (with `error.type` when
+ * it fails after its retries), and each event dropped at publish for lack of a local handler counts in
+ * `neda.event.dropped`. See `docs/observability.md`.
  */
 let RedisEventBus = (() => {
     let _classDecorators = [inject("EdaRedisClient")];
@@ -120,7 +124,10 @@ let RedisEventBus = (() => {
                 const promises = new Array();
                 partitionEvents.forEach((events, partition) => {
                     const producerKey = this._generateKey(topic, partition);
-                    const eventTypes = events.map(t => t.name);
+                    // Without the control event, which consumers neither process nor skip, so sent can match them.
+                    const eventTypes = events
+                        .filter(t => t.name !== this._nedaClearTrackedKeysEventName)
+                        .map(t => t.name);
                     promises.push(this._producers.get(producerKey).produce(...events).then(() => this._manager.otelMetrics.recordEventsSent(topic, eventTypes), (error) => {
                         this._manager.otelMetrics.recordEventsSendFailed(topic, eventTypes, error);
                         throw error;

@@ -1,6 +1,6 @@
 import { given } from "@nivinjoseph/n-defensive";
 import * as otelApi from "@opentelemetry/api";
-import { ATTR_ERROR_TYPE, ATTR_MESSAGING_CONSUMER_GROUP_NAME, ATTR_MESSAGING_DESTINATION_NAME, ATTR_MESSAGING_DESTINATION_PARTITION_ID, ATTR_MESSAGING_OPERATION_NAME, ATTR_MESSAGING_SYSTEM, ERROR_TYPE_VALUE_OTHER, METRIC_MESSAGING_CLIENT_SENT_MESSAGES, METRIC_MESSAGING_PROCESS_DURATION } from "@opentelemetry/semantic-conventions/incubating";
+import { ATTR_ERROR_TYPE, ATTR_MESSAGING_CONSUMER_GROUP_NAME, ATTR_MESSAGING_DESTINATION_NAME, ATTR_MESSAGING_DESTINATION_PARTITION_ID, ATTR_MESSAGING_SYSTEM, ERROR_TYPE_VALUE_OTHER } from "@opentelemetry/semantic-conventions/incubating";
 /** n-eda's own attributes. Namespaced, as OpenTelemetry asks of anything outside the semantic conventions. */
 const eventTypeAttribute = "neda.event.type";
 const outcomeAttribute = "neda.outcome";
@@ -20,8 +20,8 @@ const eventAgeBuckets = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 6
  * recording below costs next to nothing unless the host registered one first (for example via a preload).
  *
  * RULE: attributes must stay bounded. Topic, consumer group, event type, outcome, skip reason, error class, and
- * partition are each a small closed set; event ids and partition keys are not, and must never become attributes — every
- * distinct value is a new time series for the backend to store and bill.
+ * partition are each a small closed set; event ids and partition keys are not, and must never become
+ * attributes — every distinct value is a new time series for the backend to store and bill.
  *
  * RULE: recording never throws. Every caller sits on a delivery path — inside the consume loop, the route, or
  * the retry ladder — where a thrown error would drop an event, stall a partition, or re-run a handler that
@@ -46,7 +46,7 @@ export class EdaMetrics {
     _partitionConsumed;
     _batchesLost;
     _eventsSkipped;
-    _messagesSent;
+    _eventsSent;
     _eventsDropped;
     // topic -> partition -> the most recent index reading, when it was taken, and the highest lag since the last
     // collection. The partition instruments read only these, never the log reporter's samples.
@@ -61,7 +61,7 @@ export class EdaMetrics {
         this._meter = meter;
         given(consumerGroupId, "consumerGroupId").ensureIsString();
         this._consumerGroupId = consumerGroupId;
-        this._processDuration = meter.createHistogram(METRIC_MESSAGING_PROCESS_DURATION, {
+        this._processDuration = meter.createHistogram("neda.event.process.duration", {
             description: "Duration of one attempt to process an event, excluding the delays between retries.",
             unit: "s",
             advice: { explicitBucketBoundaries: processDurationBuckets }
@@ -94,12 +94,13 @@ export class EdaMetrics {
         // Counters rather than rate gauges: the backend derives production and consumption rates from them, at any
         // window and across resets, where a precomputed rate would fix both in n-eda.
         this._partitionWritten = meter.createObservableCounter("neda.partition.written", {
-            description: "Publish batches written to the partition: its write index.",
+            description: "Publish batches written to the partition since this process first read it.",
             unit: "{batch}",
             valueType: otelApi.ValueType.INT
         });
         this._partitionConsumed = meter.createObservableCounter("neda.partition.consumed", {
-            description: "Publish batches this consumer group has consumed from the partition: its read index.",
+            description: "Publish batches this consumer group has consumed from the partition since this process "
+                + "first read it.",
             unit: "{batch}",
             valueType: otelApi.ValueType.INT
         });
@@ -113,9 +114,9 @@ export class EdaMetrics {
             unit: "{event}",
             valueType: otelApi.ValueType.INT
         });
-        this._messagesSent = meter.createCounter(METRIC_MESSAGING_CLIENT_SENT_MESSAGES, {
+        this._eventsSent = meter.createCounter("neda.event.sent", {
             description: "Events the producer attempted to write to a partition; failed writes carry error.type.",
-            unit: "{message}",
+            unit: "{event}",
             valueType: otelApi.ValueType.INT
         });
         this._eventsDropped = meter.createCounter("neda.event.dropped", {
@@ -135,10 +136,7 @@ export class EdaMetrics {
     recordAttemptSuccess(topic, eventType, durationSeconds) {
         try {
             const attributes = this._eventAttributes(topic, eventType);
-            this._processDuration.record(durationSeconds, {
-                ...attributes,
-                [ATTR_MESSAGING_OPERATION_NAME]: "process"
-            });
+            this._processDuration.record(durationSeconds, attributes);
             this._processed.add(1, { ...attributes, [outcomeAttribute]: "success" });
         }
         catch (error) {
@@ -159,7 +157,6 @@ export class EdaMetrics {
         try {
             this._processDuration.record(durationSeconds, {
                 ...this._eventAttributes(topic, eventType),
-                [ATTR_MESSAGING_OPERATION_NAME]: "process",
                 [ATTR_ERROR_TYPE]: errorTypeOf(error)
             });
         }
@@ -240,7 +237,7 @@ export class EdaMetrics {
      */
     recordEventsSent(topic, eventTypes) {
         try {
-            this._addPerEventType(this._messagesSent, topic, eventTypes, {});
+            this._addPerEventType(this._eventsSent, topic, eventTypes, {});
         }
         catch (error) {
             reportRecordingFailure("sent events", error);
@@ -256,7 +253,7 @@ export class EdaMetrics {
      */
     recordEventsSendFailed(topic, eventTypes, error) {
         try {
-            this._addPerEventType(this._messagesSent, topic, eventTypes, { [ATTR_ERROR_TYPE]: errorTypeOf(error) });
+            this._addPerEventType(this._eventsSent, topic, eventTypes, { [ATTR_ERROR_TYPE]: errorTypeOf(error) });
         }
         catch (recordingError) {
             reportRecordingFailure("failed sends", recordingError);
@@ -280,7 +277,8 @@ export class EdaMetrics {
     /**
      * Records one reading of a partition's indexes, as taken on every pass of its consume loop. Every partition
      * instrument reads from these:
-     * - `neda.partition.written` and `neda.partition.consumed` are the latest write and read index;
+     * - `neda.partition.written` and `neda.partition.consumed` are how far the write and read index have moved
+     * since the partition's first reading in this process;
      * - `neda.partition.lag` is the latest lag, and `neda.partition.lag_peak` the highest since the previous
      * collection — what the lag gauge cannot show, a spike that subsides between two collections;
      * - `neda.partition.sample_age` is the time since the latest reading.
@@ -303,8 +301,13 @@ export class EdaMetrics {
         }
         const readings = partitions.get(partition);
         if (readings == null)
-            partitions.set(partition, { writeIndex, readIndex, lag, readAt, peakLag: lag });
+            // The counters start at 0, not at the indexes: an observable counter's first value is read as produced
+            // since the series started, so the index's whole history would land in this process's first interval.
+            partitions.set(partition, { writeIndex, readIndex, lag, readAt, peakLag: lag, written: 0, consumed: 0 });
         else {
+            // An index that drops (a Redis flush) restarted from 0, so all of it is new.
+            readings.written += writeIndex >= readings.writeIndex ? writeIndex - readings.writeIndex : writeIndex;
+            readings.consumed += readIndex >= readings.readIndex ? readIndex - readings.readIndex : readIndex;
             readings.writeIndex = writeIndex;
             readings.readIndex = readIndex;
             readings.lag = lag;
@@ -336,9 +339,8 @@ export class EdaMetrics {
                 // Clamped: a backwards clock step would otherwise report a frozen reading as fresher than a
                 // live one.
                 observer.observe(this._partitionSampleAge, Math.max(0, now - readings.readAt) / 1000, attributes);
-                // An index that drops (a Redis flush) is a counter reset, which the SDK and backends handle.
-                observer.observe(this._partitionWritten, readings.writeIndex, attributes);
-                observer.observe(this._partitionConsumed, readings.readIndex, attributes);
+                observer.observe(this._partitionWritten, readings.written, attributes);
+                observer.observe(this._partitionConsumed, readings.consumed, attributes);
                 readings.peakLag = readings.lag;
             }));
         };
@@ -350,7 +352,6 @@ export class EdaMetrics {
         eventTypes.forEach(t => counts.set(t, (counts.get(t) ?? 0) + 1));
         counts.forEach((count, eventType) => counter.add(count, {
             ...this._producerAttributes(topic, eventType),
-            [ATTR_MESSAGING_OPERATION_NAME]: "send",
             ...attributes
         }));
     }

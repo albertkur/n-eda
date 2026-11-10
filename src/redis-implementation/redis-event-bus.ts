@@ -154,7 +154,10 @@ export class RedisEventBus implements EventBus
             partitionEvents.forEach((events, partition) =>
             {
                 const producerKey = this._generateKey(topic, partition);
-                const eventTypes = events.map(t => t.name);
+                // Without the control event, which consumers neither process nor skip, so sent can match them.
+                const eventTypes = events
+                    .filter(t => t.name !== this._nedaClearTrackedKeysEventName)
+                    .map(t => t.name);
                 promises.push(this._producers.get(producerKey)!.produce(...events).then(
                     () => this._manager.otelMetrics.recordEventsSent(topic, eventTypes),
                     (error: unknown) =>

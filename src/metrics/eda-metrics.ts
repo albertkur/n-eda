@@ -126,13 +126,14 @@ export class EdaMetrics
         // Counters rather than rate gauges: the backend derives production and consumption rates from them, at any
         // window and across resets, where a precomputed rate would fix both in n-eda.
         this._partitionWritten = meter.createObservableCounter("neda.partition.written", {
-            description: "Publish batches written to the partition: its write index.",
+            description: "Publish batches written to the partition since this process first read it.",
             unit: "{batch}",
             valueType: otelApi.ValueType.INT
         });
 
         this._partitionConsumed = meter.createObservableCounter("neda.partition.consumed", {
-            description: "Publish batches this consumer group has consumed from the partition: its read index.",
+            description: "Publish batches this consumer group has consumed from the partition since this process "
+                + "first read it.",
             unit: "{batch}",
             valueType: otelApi.ValueType.INT
         });
@@ -352,7 +353,8 @@ export class EdaMetrics
     /**
      * Records one reading of a partition's indexes, as taken on every pass of its consume loop. Every partition
      * instrument reads from these:
-     * - `neda.partition.written` and `neda.partition.consumed` are the latest write and read index;
+     * - `neda.partition.written` and `neda.partition.consumed` are how far the write and read index have moved
+     * since the partition's first reading in this process;
      * - `neda.partition.lag` is the latest lag, and `neda.partition.lag_peak` the highest since the previous
      * collection — what the lag gauge cannot show, a spike that subsides between two collections;
      * - `neda.partition.sample_age` is the time since the latest reading.
@@ -379,9 +381,14 @@ export class EdaMetrics
 
         const readings = partitions.get(partition);
         if (readings == null)
-            partitions.set(partition, { writeIndex, readIndex, lag, readAt, peakLag: lag });
+            // The counters start at 0, not at the indexes: an observable counter's first value is read as produced
+            // since the series started, so the index's whole history would land in this process's first interval.
+            partitions.set(partition, { writeIndex, readIndex, lag, readAt, peakLag: lag, written: 0, consumed: 0 });
         else
         {
+            // An index that drops (a Redis flush) restarted from 0, so all of it is new.
+            readings.written += writeIndex >= readings.writeIndex ? writeIndex - readings.writeIndex : writeIndex;
+            readings.consumed += readIndex >= readings.readIndex ? readIndex - readings.readIndex : readIndex;
             readings.writeIndex = writeIndex;
             readings.readIndex = readIndex;
             readings.lag = lag;
@@ -419,9 +426,8 @@ export class EdaMetrics
                 // Clamped: a backwards clock step would otherwise report a frozen reading as fresher than a
                 // live one.
                 observer.observe(this._partitionSampleAge, Math.max(0, now - readings.readAt) / 1000, attributes);
-                // An index that drops (a Redis flush) is a counter reset, which the SDK and backends handle.
-                observer.observe(this._partitionWritten, readings.writeIndex, attributes);
-                observer.observe(this._partitionConsumed, readings.readIndex, attributes);
+                observer.observe(this._partitionWritten, readings.written, attributes);
+                observer.observe(this._partitionConsumed, readings.consumed, attributes);
 
                 readings.peakLag = readings.lag;
             }));
@@ -484,6 +490,10 @@ interface PartitionReadings
 {
     writeIndex: number;
     readIndex: number;
+    /** Batches written since the partition's first reading in this process. */
+    written: number;
+    /** Batches this consumer group consumed since the partition's first reading in this process. */
+    consumed: number;
     /** `writeIndex - readIndex`, clamped at 0. */
     lag: number;
     /** Epoch ms the latest reading was taken. */

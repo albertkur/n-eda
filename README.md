@@ -537,7 +537,7 @@ n-eda also records metrics under the meter name `"n-eda"`:
 | `neda.partition.lag` | observable gauge, batches | Lag per partition |
 | `neda.partition.lag_peak` | observable gauge, batches | The highest lag since the previous collection, even if it drained before then |
 | `neda.partition.sample_age` | observable gauge, seconds | How stale that lag figure is; climbs while a partition is stuck |
-| `neda.partition.written` / `neda.partition.consumed` | observable counters, batches | Write and read index per partition; their rates are the production and consumption rates |
+| `neda.partition.written` / `neda.partition.consumed` | observable counters, batches | Batches written to and consumed from each partition since the process first read it; their rates are the production and consumption rates |
 | `neda.batch.lost` | counter, batches | Batches whose payload never arrived or expired: lost events. Alert on any increase |
 | `neda.event.skipped` | counter | Events a consumer passed over, by `neda.skip.reason`: `duplicate`, `no_handler`, `partition_key_error` |
 | `neda.event.sent` | counter | Events published, per type, from the publishing process; failed writes carry `error.type` |

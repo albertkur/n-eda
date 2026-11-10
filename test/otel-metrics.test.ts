@@ -405,13 +405,13 @@ await describe("OpenTelemetry metrics tests", async () =>
             await pipeline.shutdown();
         });
 
-        await test("the counters carry the write and read index, for the backend to rate", async () =>
+        await test("the counters count batches from the first reading, for the backend to rate", async () =>
         {
-            // Cumulative, as n-strument exports: each point is the index itself.
+            // Cumulative, as n-strument exports: each point is the total since the partition's first reading.
             const pipeline = new TestMetricsPipeline();
             const edaMetrics = new EdaMetrics(pipeline.meter(), "billing");
             const unobserve = edaMetrics.observePartitions();
-            const indexes = async (): Promise<Array<Array<number>>> =>
+            const counts = async (): Promise<Array<Array<number>>> =>
             {
                 const collected = await pipeline.collect();
                 return ["neda.partition.written", "neda.partition.consumed"]
@@ -430,16 +430,17 @@ await describe("OpenTelemetry metrics tests", async () =>
                     `${name} should be a counter`);
                 assert.deepStrictEqual(first.points(name, ordersZero)[0].attributes, ordersZero);
             }
-            assert.deepStrictEqual(first.points("neda.partition.written", ordersZero).map(p => p.value), [100]);
-            assert.deepStrictEqual(first.points("neda.partition.consumed", ordersZero).map(p => p.value), [60]);
+            // Not the indexes: their history before this process would read as one huge first interval.
+            assert.deepStrictEqual(first.points("neda.partition.written", ordersZero).map(p => p.value), [0]);
+            assert.deepStrictEqual(first.points("neda.partition.consumed", ordersZero).map(p => p.value), [0]);
 
             // 30 batches written and 20 consumed in between: what rate() turns into the two rates.
             edaMetrics.recordPartitionReading("orders", 0, 130, 80);
-            assert.deepStrictEqual(await indexes(), [[130], [80]]);
+            assert.deepStrictEqual(await counts(), [[30], [20]]);
 
-            // A Redis flush drops both indexes: a counter reset, carried as the new value, not a negative one.
+            // A Redis flush restarts both indexes from 0: the 5 written since count, and neither counter goes back.
             edaMetrics.recordPartitionReading("orders", 0, 5, 0);
-            assert.deepStrictEqual(await indexes(), [[5], [0]]);
+            assert.deepStrictEqual(await counts(), [[35], [20]]);
 
             unobserve();
             await pipeline.shutdown();

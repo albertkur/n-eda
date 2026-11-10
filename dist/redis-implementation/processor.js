@@ -20,7 +20,7 @@ import { ATTR_MESSAGING_SYSTEM, ATTR_MESSAGING_OPERATION_TYPE, ATTR_MESSAGING_DE
  * Subclasses supply the actual dispatch: `DefaultProcessor` runs handlers in-process; the proxy processors
  * forward to Lambda, RPC, or gRPC.
  *
- * Metrics: every attempt records its duration (`messaging.process.duration`, with `error.type` when it threw),
+ * Metrics: every attempt records its duration (`neda.event.process.duration`, with `error.type` when it threw),
  * and every final outcome counts once in `neda.event.processed`. For the proxy processors the duration
  * includes the network round trip. Nothing is recorded when disposal interrupts an event, because it replays.
  */
